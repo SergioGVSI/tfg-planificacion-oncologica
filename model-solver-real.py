@@ -1,9 +1,9 @@
 # Modelo MILP lexicografico para citacion en hospital de dia oncologico
-# Implementacion fiel a Carello, Passacantando & Tanfani (EJOR, 2025)
+# Datos reales: instancias .dat del articulo (San Martino Hospital, Genova)
+# Carello, Passacantando & Tanfani (EJOR, 2025)
 # Secuencia: P1 (min overtime F1) -> P2 (min max-espera F2) -> P3 (max sillon F3)
 # Solver: Gurobi via amplpy
 
-import math
 import os
 import re
 import sys
@@ -22,14 +22,11 @@ AMPL_UUID = ""
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURACION
 # ─────────────────────────────────────────────────────────────────────────────
-SIMULATED_DIR = os.path.join("Databases", "simulated-sets")
-OPTIMIZED_DIR = os.path.join("Databases", "optimized-sets")
-LOGS_DIR      = "logs-ampl"
-BASE_SEED     = 20260427
+REAL_DIR      = os.path.join("Databases", "real-sets")
+OPTIMIZED_DIR = os.path.join("Databases", "optimized-sets-real")
+LOGS_DIR      = "logs-real"
 
-DIAS = [1, 2, 3, 4, 5]
-
-# Articulo: |SV|=48 (36 regulares 8:00-14:00 + 12 overtime), |SI|=66 (54 + 12)
+# Articulo: |SV|=48 (36 regulares + 12 overtime), |SI|=66 (54 + 12)
 SLOTS_VISITA   = list(range(1, 49))
 SLOTS_INFUSION = list(range(1, 67))
 NV = 36   # ultimo slot regular visitas  -> 14:00
@@ -39,45 +36,49 @@ MAX_SALAS    = 6
 MAX_SILLONES = 26
 MAX_CAMAS    = 27
 
-TIME_LIMIT_P1  = 600    # seg
+TIME_LIMIT_P1  = 600
 TIME_LIMIT_P2  = 600
 TIME_LIMIT_P3  = 1200
 TIME_LIMIT_DAY = 120
 GAP_REL        = 0.05
 
-FRACCIONES = [
-    ("1of3", 1 / 3),
-    ("2of3", 2 / 3),
-    ("3of3", 1.0),
-]
+# Instancias a descartar del barrido principal:
+#  - istanza14 (612/156, 4 dias): la unica de las 52 que NO figura en la Tabla 7
+#    (cruzando ptot y nº de criticos con las 51 filas). Las 51 restantes se procesan.
+EXCLUDED_INSTANCES = {"istanza14"}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODELO AMPL — definicion algebraica compartida por P1, P2, P3
+# MODELO AMPL — con restriccion MCP real (constraint 2 del articulo)
 # ─────────────────────────────────────────────────────────────────────────────
-# El modelo se escribe una vez en sintaxis AMPL. Los tres problemas comparten
-# variables y restricciones; lo unico que cambia es la funcion objetivo activa
-# y las restricciones epsilon-constraint que se anaden en P2 y P3.
+# Diferencia clave respecto al solver de datos simulados:
+# - Se añaden conjuntos R (salas) y K (patologias)
+# - Se añade param alpha{P} (patologia de cada paciente)
+# - Se añade param w{R,K,D} (asignacion sala-patologia-dia, MCP)
+# - La restriccion cap_salas usa MCP por patologia, no capacidad global
+# - D es variable (4 o 5 dias segun la instancia)
 AMPL_MODEL = """
 # ── Conjuntos ──────────────────────────────────────────────────────────────
 set P;          # todos los pacientes
 set PB;         # criticos (requieren cama)
 set PC;         # no-criticos (sillon o cama)
-set D;          # dias {1..5}
+set D;          # dias de trabajo {1..giornilav}
 set SV;         # slots de visita {1..48}
 set SI;         # slots de infusion {1..66}
+set K;          # patologias {1..7}
 
 # ── Parametros ─────────────────────────────────────────────────────────────
-param vp{P}  integer >= 1;   # duracion visita (slots)
-param fp{P}  integer >= 1;   # duracion infusion (slots)
-param NV     integer;        # ultimo slot regular visita
-param NI     integer;        # ultimo slot regular infusion
-param RSALAS integer;        # capacidad salas
-param RSILL  integer;        # capacidad sillones
-param RCAMA  integer;        # capacidad camas
+param vp{P}      integer >= 1;   # duracion visita (slots)
+param fp{P}      integer >= 1;   # duracion infusion (slots)
+param alpha{P}   integer >= 1;   # patologia del paciente
+param nsalas{K, D} integer >= 0; # MCP: nº de salas asignadas a patologia k en dia d
+param NV         integer;        # ultimo slot regular visita
+param NI         integer;        # ultimo slot regular infusion
+param RSILL      integer;        # capacidad sillones
+param RCAMA      integer;        # capacidad camas
 
 # epsilon-constraint (activados en P2 y P3)
-param v1_bar default 1e9;    # cota F1 (fijada por P1)
-param v2_bar default 1e9;    # cota F2 (fijada por P2)
+param v1_bar default 1e9;
+param v2_bar default 1e9;
 
 # ── Variables de decision ──────────────────────────────────────────────────
 var x{P, D, SV}  binary;    # inicio visita
@@ -88,7 +89,7 @@ var aV{D} >= 0;              # overtime visitas por dia
 var aI{D} >= 0;              # overtime infusiones por dia
 var om{D} >= 0;              # max espera por dia
 
-# ── Funciones objetivo (se activa una segun el problema) ───────────────────
+# ── Funciones objetivo ─────────────────────────────────────────────────────
 minimize OvertimeTotal:
     sum{d in D} (aV[d] + aI[d]);
 
@@ -98,15 +99,17 @@ minimize WaitTotal:
 maximize ChairsTotal:
     sum{p in PC, d in D, s in SI} zC[p,d,s];
 
-# ── Restricciones (1)-(10) del articulo ────────────────────────────────────
+# ── Restricciones ──────────────────────────────────────────────────────────
 
 # (1) Unicidad
 subject to unicidad{p in P}:
     sum{d in D, s in SV} x[p,d,s] = 1;
 
-# (2) Capacidad salas (ventana deslizante)
-subject to cap_salas{d in D, s in SV}:
-    sum{p in P, q in SV: q >= max(1, s-vp[p]+1) and q <= s} x[p,d,q] <= RSALAS;
+# (2) Capacidad salas por patologia (MCP real — ecuacion 2 del articulo)
+# nsalas[k,d] = sum_r w[r,k,d] del articulo (nº de salas asignadas a k en d)
+subject to cap_salas{k in K, d in D, s in SV}:
+    sum{p in P, q in SV: alpha[p] = k and q >= max(1, s-vp[p]+1) and q <= s} x[p,d,q]
+    <= nsalas[k,d];
 
 # (3) Mismo dia visita-infusion criticos
 subject to mismo_dia_pb{p in PB, d in D}:
@@ -152,14 +155,14 @@ subject to espera_pb{p in PB, d in D}:
 subject to espera_pc{p in PC, d in D}:
     om[d] >= sum{s in SI} s * (zB[p,d,s] + zC[p,d,s]) - sum{s in SV} (s + vp[p]) * x[p,d,s];
 
-# Epsilon-constraints (inactivas por defecto, se activan en P2 y P3)
+# Epsilon-constraints
 subject to eps_f1: sum{d in D} (aV[d] + aI[d]) <= v1_bar;
 subject to eps_f2: sum{d in D} om[d] <= v2_bar;
 """
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TEE — stdout a consola y fichero simultaneamente
+# TEE
 # ─────────────────────────────────────────────────────────────────────────────
 class Tee:
     def __init__(self, file_path):
@@ -185,85 +188,221 @@ class Tee:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UTILIDADES
+# PARSER DE FICHEROS .dat
 # ─────────────────────────────────────────────────────────────────────────────
-def _natural_key(path):
-    m = re.search(r"(\d+)", os.path.basename(path))
-    return int(m.group(1)) if m else 10 ** 9
+def parse_dat(path):
+    """
+    Lee un fichero .dat del articulo y devuelve un dict con:
+      giornilav  : int (4 o 5)
+      w          : dict {(r, k, d): 1}  -- MCP
+      patients   : list de dict {id, alpha, v, f, lambda_}
+    """
+    with open(path, "r", encoding="utf-8") as fh:
+        text = fh.read()
+
+    # giornilav
+    m = re.search(r"param\s+giornilav\s*:=\s*(\d+)", text)
+    giornilav = int(m.group(1))
+
+    # c[i,j] = 1 si el i-esimo dia laborable corresponde al j-esimo dia natural.
+    # Se construye c_map[i] = j (dia natural de semana del i-esimo dia laborable).
+    c_map = {}
+    c_block = re.search(r"param\s+c\s*:\s*([\d\s]+?):=(.*?);", text, re.DOTALL)
+    if c_block:
+        cols = [int(x) for x in c_block.group(1).split()]
+        for row in c_block.group(2).strip().splitlines():
+            vals = row.split()
+            if not vals or not vals[0].isdigit():
+                continue
+            i = int(vals[0])
+            for col_idx, flag in zip(cols, vals[1:]):
+                if flag == "1":
+                    c_map[i] = col_idx
+                    break
+
+    # w[r, k, d]
+    w = {}
+    w_block = re.search(r"param\s+w\s*:=(.*?);", text, re.DOTALL)
+    if w_block:
+        for entry in re.finditer(r"\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]\s+1", w_block.group(1)):
+            r, k, d = int(entry.group(1)), int(entry.group(2)), int(entry.group(3))
+            w[(r, k, d)] = 1
+
+    # pacientes: bloque "param: alpha v f lambda :="
+    patients = []
+    pat_block = re.search(r"param\s*:\s*alpha\s+v\s+f\s+lambda\s*:=(.*?);", text, re.DOTALL)
+    if pat_block:
+        for row in re.finditer(r"(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)", pat_block.group(1)):
+            patients.append({
+                "id":      int(row.group(1)),
+                "alpha":   int(row.group(2)),
+                "v":       int(row.group(3)),
+                "f":       int(row.group(4)),
+                "lambda_": int(row.group(5)),
+            })
+
+    return {"giornilav": giornilav, "c_map": c_map, "w": w, "patients": patients}
 
 
-def get_csv_files():
-    files = glob(os.path.join(SIMULATED_DIR, "*.csv"))
-    files.sort(key=_natural_key)
-    return files
+MAX_SALAS_DIA = 6  # nº de salas fisicas del centro (no se puede exceder por dia)
 
 
-def sample_prefixes(df, seed):
-    n    = len(df)
-    rng  = np.random.default_rng(seed)
-    df_p = df.iloc[rng.permutation(n)].reset_index(drop=True)
-    n1, n2 = math.ceil(n / 3), math.ceil(2 * n / 3)
-    return {
-        "1of3": df_p.iloc[:n1].copy(),
-        "2of3": df_p.iloc[:n2].copy(),
-        "3of3": df_p.copy(),
-    }
+def build_nsalas(g, c_map, w, demanda_k=None):
+    """Construye nsalas[(k, dia_laborable)] = nº de salas asignadas a la patologia k.
+
+    El MCP w esta indexado por dia NATURAL de semana (1=lunes .. 5=viernes) y trae
+    siempre 5 columnas (30 bloques = 6 salas x 5 dias), aun en semanas con festivo.
+    El modelo trabaja con dias laborables 1..g, y el bloque del articulo se define
+    sobre (sala, dia LABORABLE). El tratamiento de los festivos se deduce asi:
+
+    - El articulo (§5.5) reporta overtime>0 en sus semanas con festivo (11,16,17),
+      NO overtime 0: los festivos generan ESCASEZ de salas. Punto de partida: los
+      bloques del dia festivo se descartan (solo cuentan los dias trabajados).
+    - El MCP se redefine mensualmente segun la demanda; en una semana con festivo
+      esa redefinicion redistribuye bloques entre patologias. Lo reproducimos con un
+      REBALANCEO por deficit/holgura: si una patologia no tiene salas suficientes
+      para su demanda (deficit), se le da una sala quitandosela a una patologia con
+      holgura EN EL MISMO DIA. El swap conserva el tope de MAX_SALAS_DIA salas/dia.
+
+    `demanda_k[k]` = suma de slots de visita de la patologia k (para calcular el
+    nº minimo de salas necesarias = ceil(demanda / |SV|)). Si es None, no se
+    rebalancea (solo se descartan festivos).
+
+    Esta regla reproduce la factibilidad-con-overtime del articulo. Si tras el
+    rebalanceo aun queda deficit (no hay holgura suficiente), la instancia no es
+    reproducible con el MCP disponible (ver EXCLUDED_INSTANCES).
+    """
+    import math
+
+    nat_to_lab = {c_map[i]: i for i in c_map}
+    weekdays   = set(c_map.values())
+    labs       = list(range(1, g + 1))
+    SV_LEN     = len(SLOTS_VISITA)  # 48 (capacidad maxima de una sala-dia con overtime)
+
+    # salas por (k, dia_natural)
+    salas_nat = {}
+    for (r, k, d), val in w.items():
+        salas_nat[(k, d)] = salas_nat.get((k, d), 0) + val
+
+    # Base: solo dias trabajados, reindexados a dia laborable
+    nsalas = {(k, lab): 0 for k in range(1, 8) for lab in labs}
+    for (k, d_nat), val in salas_nat.items():
+        if d_nat in weekdays:
+            nsalas[(k, nat_to_lab[d_nat])] += val
+
+    # Sin festivo (semana completa) o sin demanda: no se rebalancea
+    if not (set(range(1, 6)) - weekdays) or demanda_k is None:
+        return nsalas
+
+    def salas_pat(k):
+        return sum(nsalas[(k, lab)] for lab in labs)
+
+    def salas_min(k):
+        return math.ceil(demanda_k.get(k, 0) / SV_LEN) if demanda_k.get(k, 0) else 0
+
+    # Rebalanceo: dar salas a patologias en deficit quitandolas de las que sobran.
+    # Tope de iteraciones por seguridad (a lo sumo |K|*|labs| movimientos utiles).
+    for _ in range(len(labs) * 7):
+        deficit = [k for k in range(1, 8) if salas_pat(k) < salas_min(k)]
+        if not deficit:
+            break
+        k_need = deficit[0]
+        donante = None
+        for d in labs:
+            # patologia con sala ese dia y holgura, distinta de la receptora,
+            # y que la receptora no tenga ya sala ese dia (evita acumular en mismo dia)
+            for k_don in range(1, 8):
+                if (k_don != k_need and nsalas[(k_don, d)] > 0
+                        and salas_pat(k_don) > salas_min(k_don)
+                        and nsalas[(k_need, d)] == 0):
+                    donante = (k_don, d)
+                    break
+            if donante:
+                break
+        if donante is None:
+            break  # no hay holgura: deficit irreparable
+        k_don, d = donante
+        nsalas[(k_don, d)] -= 1
+        nsalas[(k_need, d)] += 1
+    return nsalas
 
 
-def _prepare_data(df):
-    ids  = df["ID_Paciente"].tolist()
-    v_p  = dict(zip(df["ID_Paciente"], df["Visita_Slots"].astype(int)))
-    f_p  = dict(zip(df["ID_Paciente"], df["Infusion_Slots"].astype(int)))
-    crit = dict(zip(df["ID_Paciente"], df["Critico_Cama"].astype(int)))
-    PB   = [p for p in ids if crit[p] == 1]
-    PC   = [p for p in ids if crit[p] == 0]
-    return PB, PC, v_p, f_p
+def prepare_instance(dat):
+    """Convierte el resultado de parse_dat en las estructuras que necesita el solver.
+
+    Devuelve nsalas[(k, d)] = sum_r w[r,k,d] del articulo, ya reindexado a dia
+    laborable mediante build_nsalas (acumulando los bloques de dias festivos).
+    """
+    g    = dat["giornilav"]
+    dias = list(range(1, g + 1))
+    # c_map por defecto = identidad (semana sin festivos)
+    c_map = dat["c_map"] or {i: i for i in dias}
+
+    # Demanda de slots de visita por patologia (para el rebalanceo del MCP)
+    demanda_k = {}
+    for p in dat["patients"]:
+        demanda_k[p["alpha"]] = demanda_k.get(p["alpha"], 0) + p["v"]
+
+    nsalas = build_nsalas(g, c_map, dat["w"], demanda_k)
+
+    PB, PC = [], []
+    v_p, f_p, alpha_p = {}, {}, {}
+
+    for p in dat["patients"]:
+        pid = p["id"]
+        v_p[pid]    = p["v"]
+        f_p[pid]    = p["f"]
+        alpha_p[pid] = p["alpha"]
+        if p["lambda_"] == 1:
+            PB.append(pid)
+        else:
+            PC.append(pid)
+
+    return dias, PB, PC, v_p, f_p, alpha_p, nsalas
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTRUCCION DE LA INSTANCIA AMPL
 # ─────────────────────────────────────────────────────────────────────────────
-def _build_ampl(PB, PC, v_p, f_p):
-    """Crea un objeto AMPL, carga el modelo y rellena los datos de la instancia."""
+def _build_ampl(dias, PB, PC, v_p, f_p, alpha_p, nsalas):
     ampl = AMPL()
     ampl.eval(AMPL_MODEL)
 
     P = PB + PC
+    patologias = list(range(1, 8))
 
-    # Conjuntos
     ampl.set["P"]  = P
     ampl.set["PB"] = PB
     ampl.set["PC"] = PC
-    ampl.set["D"]  = DIAS
+    ampl.set["D"]  = dias
     ampl.set["SV"] = SLOTS_VISITA
     ampl.set["SI"] = SLOTS_INFUSION
+    ampl.set["K"]  = patologias
 
-    # Parametros escalares
-    ampl.param["NV"]     = NV
-    ampl.param["NI"]     = NI
-    ampl.param["RSALAS"] = MAX_SALAS
-    ampl.param["RSILL"]  = MAX_SILLONES
-    ampl.param["RCAMA"]  = MAX_CAMAS
+    ampl.param["NV"]   = NV
+    ampl.param["NI"]   = NI
+    ampl.param["RSILL"] = MAX_SILLONES
+    ampl.param["RCAMA"] = MAX_CAMAS
 
-    # Parametros indexados por paciente
-    ampl.param["vp"] = {p: v_p[p] for p in P}
-    ampl.param["fp"] = {p: f_p[p] for p in P}
+    ampl.param["vp"]    = {p: v_p[p]    for p in P}
+    ampl.param["fp"]    = {p: f_p[p]    for p in P}
+    ampl.param["alpha"] = {p: alpha_p[p] for p in P}
 
-    # Configuracion de Gurobi
-    ampl.option["solver"]        = "gurobi"
+    # nsalas[k, d] = nº de salas para la patologia k en el dia laborable d
+    ampl.param["nsalas"] = {(k, d): nsalas.get((k, d), 0)
+                            for k in patologias for d in dias}
+
+    ampl.option["solver"]         = "gurobi"
     ampl.option["gurobi_options"] = f"mipgap={GAP_REL} outlev=1"
 
     return ampl
 
 
 def _set_time_limit(ampl, seconds):
-    ampl.option["gurobi_options"] = (
-        f"mipgap={GAP_REL} outlev=1 timelim={seconds}"
-    )
+    ampl.option["gurobi_options"] = f"mipgap={GAP_REL} outlev=1 timelim={seconds}"
 
 
 def _solve_status(ampl):
-    """Devuelve el texto de estado del solver (Optimal, Infeasible, etc.)."""
     return ampl.get_value("solve_result")
 
 
@@ -278,31 +417,27 @@ def _obj_value(ampl, obj_name):
 # LECTURA DE SOLUCION
 # ─────────────────────────────────────────────────────────────────────────────
 def _read_var3_df(df):
-    """Convierte un DataFrame de amplpy (reset_index) en dict {(p,d,s): val}."""
     result = {}
-    arr = df.values  # numpy array; columnas: p, d, s, value
+    arr = df.values
     for row in arr:
         result[(row[0], int(row[1]), int(row[2]))] = row[3]
     return result
 
 
 def _read_x(ampl):
-    """Devuelve dict {(p,d,s): valor} para la variable x."""
     df = ampl.var["x"].get_values().to_pandas().reset_index()
     return _read_var3_df(df)
 
 
 def _read_var3(ampl, var_name, index_set):
-    """Lee una variable 3D (p in index_set, d, s) y devuelve dict."""
     if not index_set:
         return {}
     df = ampl.var[var_name].get_values().to_pandas().reset_index()
     return _read_var3_df(df)
 
 
-def _day_assignments(x_vals, P):
-    """Extrae asignacion de pacientes a dias desde la solucion de x."""
-    Pd = {d: [] for d in DIAS}
+def _day_assignments(x_vals, P, dias):
+    Pd = {d: [] for d in dias}
     assigned = set()
     for (p, d, s), v in x_vals.items():
         if v > 0.5 and p not in assigned:
@@ -314,13 +449,12 @@ def _day_assignments(x_vals, P):
 # ─────────────────────────────────────────────────────────────────────────────
 # PROBLEMA 1 — min F1
 # ─────────────────────────────────────────────────────────────────────────────
-def solve_p1(PB, PC, v_p, f_p):
+def solve_p1(dias, PB, PC, v_p, f_p, alpha_p, w_mcp):
     P = PB + PC
     print(f"\n{'─' * 60}")
     print(f"[P1] min overtime F1 | {len(PB)} criticos  {len(PC)} no-criticos")
 
-    ampl = _build_ampl(PB, PC, v_p, f_p)
-    # eps_f1 y eps_f2 inactivas (v1_bar=v2_bar=1e9 por defecto)
+    ampl = _build_ampl(dias, PB, PC, v_p, f_p, alpha_p, w_mcp)
     ampl.eval("drop eps_f1; drop eps_f2;")
     ampl.eval("objective OvertimeTotal;")
     _set_time_limit(ampl, TIME_LIMIT_P1)
@@ -334,10 +468,10 @@ def solve_p1(PB, PC, v_p, f_p):
     print(f"[P1] {status} | F1 = {f1:.1f} slots overtime | {elapsed:.1f}s")
 
     x_vals = _read_x(ampl)
-    Pd     = _day_assignments(x_vals, P)
+    Pd     = _day_assignments(x_vals, P, dias)
 
-    aV_vals = {d: max(0.0, ampl.var["aV"][d].value()) for d in DIAS}
-    aI_vals = {d: max(0.0, ampl.var["aI"][d].value()) for d in DIAS}
+    aV_vals = {d: max(0.0, ampl.var["aV"][d].value()) for d in dias}
+    aI_vals = {d: max(0.0, ampl.var["aI"][d].value()) for d in dias}
 
     return {
         "status":  status,
@@ -346,34 +480,25 @@ def solve_p1(PB, PC, v_p, f_p):
         "Pd":      Pd,
         "aV":      aV_vals,
         "aI":      aI_vals,
-        "ampl":    ampl,   # guardamos la instancia para extraer warm start
+        "ampl":    ampl,
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DESCOMPOSICION DIARIA — Procedimiento 2 (warm start para P2)
 # ─────────────────────────────────────────────────────────────────────────────
-def _solve_day_p2(d, PB_d, PC_d, v_p, f_p, aV_fixed, aI_fixed):
-    """Sub-problema de un dia para generar warm start de P2."""
+def _solve_day_p2(d, PB_d, PC_d, v_p, f_p, alpha_p, w_mcp, aV_fixed, aI_fixed):
     P_d = PB_d + PC_d
     if not P_d:
         return {"om": 0.0, "x": {}, "y": {}, "zB": {}, "zC": {}}
 
-    ampl = _build_ampl(PB_d, PC_d, v_p, f_p)
-
-    # Solo un dia
-    ampl.set["D"] = [d]
-
-    # Fijar overtime a valores optimos de P1
+    ampl = _build_ampl([d], PB_d, PC_d, v_p, f_p, alpha_p, w_mcp)
     ampl.var["aV"][d].fix(aV_fixed)
     ampl.var["aI"][d].fix(aI_fixed)
 
     ampl.eval("drop eps_f1; drop eps_f2;")
     ampl.eval("objective WaitTotal;")
-    _set_time_limit(ampl, TIME_LIMIT_DAY)
-    ampl.option["gurobi_options"] = (
-        f"mipgap={GAP_REL} outlev=0 timelim={TIME_LIMIT_DAY}"
-    )
+    ampl.option["gurobi_options"] = f"mipgap={GAP_REL} outlev=0 timelim={TIME_LIMIT_DAY}"
 
     ampl.solve()
 
@@ -383,20 +508,19 @@ def _solve_day_p2(d, PB_d, PC_d, v_p, f_p, aV_fixed, aI_fixed):
         return {"om": 0.0, "x": {}, "y": {}, "zB": {}, "zC": {}}
 
     om_val = max(0.0, ampl.var["om"][d].value())
-    sol = {
+    return {
         "om":  om_val,
         "x":   _read_x(ampl),
         "y":   _read_var3(ampl, "y",  PB_d),
         "zB":  _read_var3(ampl, "zB", PC_d),
         "zC":  _read_var3(ampl, "zC", PC_d),
     }
-    return sol
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PROBLEMA 2 — min F2
 # ─────────────────────────────────────────────────────────────────────────────
-def solve_p2(PB, PC, v_p, f_p, r1):
+def solve_p2(dias, PB, PC, v_p, f_p, alpha_p, w_mcp, r1):
     P   = PB + PC
     v1  = r1["v1"]
     Pd  = r1["Pd"]
@@ -408,21 +532,19 @@ def solve_p2(PB, PC, v_p, f_p, r1):
     print("[P2] Procedimiento 2: descomposicion por dia...")
 
     day_sols = {}
-    for d in DIAS:
+    for d in dias:
         PB_d = [p for p in Pd[d] if p in PB]
         PC_d = [p for p in Pd[d] if p in PC]
-        s    = _solve_day_p2(d, PB_d, PC_d, v_p, f_p, aV0[d], aI0[d])
+        s    = _solve_day_p2(d, PB_d, PC_d, v_p, f_p, alpha_p, w_mcp, aV0[d], aI0[d])
         day_sols[d] = s
         print(f"  Dia {d}: {len(Pd[d])} pacientes | omega = {s['om']:.1f} slots")
 
-    # Problema P2 completo con warm start
-    ampl = _build_ampl(PB, PC, v_p, f_p)
-    ampl.eval("drop eps_f2;")          # solo eps_f1 activa
+    ampl = _build_ampl(dias, PB, PC, v_p, f_p, alpha_p, w_mcp)
+    ampl.eval("drop eps_f2;")
     ampl.param["v1_bar"] = v1
     ampl.eval("objective WaitTotal;")
     _set_time_limit(ampl, TIME_LIMIT_P2)
 
-    # Warm start: inyectar solucion de sub-problemas diarios
     for d, sol in day_sols.items():
         for (p, dd, s), v in sol["x"].items():
             ampl.var["x"][p, dd, s].set_value(round(v))
@@ -433,7 +555,7 @@ def solve_p2(PB, PC, v_p, f_p, r1):
         for (p, dd, s), v in sol["zC"].items():
             ampl.var["zC"][p, dd, s].set_value(round(v))
         ampl.var["om"][d].set_value(sol["om"])
-    for d in DIAS:
+    for d in dias:
         ampl.var["aV"][d].set_value(aV0[d])
         ampl.var["aI"][d].set_value(aI0[d])
 
@@ -447,16 +569,16 @@ def solve_p2(PB, PC, v_p, f_p, r1):
     print(f"[P2] {status} | F2 = {f2:.1f} slots | {elapsed:.1f}s")
 
     x_vals = _read_x(ampl)
-    Pd2    = _day_assignments(x_vals, P)
+    Pd2    = _day_assignments(x_vals, P, dias)
 
     return {
         "status":  status,
         "v2":      f2 if f2 is not None else float("inf"),
         "elapsed": elapsed,
         "Pd":      Pd2,
-        "aV":      {d: max(0.0, ampl.var["aV"][d].value()) for d in DIAS},
-        "aI":      {d: max(0.0, ampl.var["aI"][d].value()) for d in DIAS},
-        "om":      {d: max(0.0, ampl.var["om"][d].value())  for d in DIAS},
+        "aV":      {d: max(0.0, ampl.var["aV"][d].value()) for d in dias},
+        "aI":      {d: max(0.0, ampl.var["aI"][d].value()) for d in dias},
+        "om":      {d: max(0.0, ampl.var["om"][d].value())  for d in dias},
         "ampl":    ampl,
     }
 
@@ -464,45 +586,44 @@ def solve_p2(PB, PC, v_p, f_p, r1):
 # ─────────────────────────────────────────────────────────────────────────────
 # PROBLEMA 3 — max F3
 # ─────────────────────────────────────────────────────────────────────────────
-def solve_p3(PB, PC, v_p, f_p, r1, r2):
+def solve_p3(dias, PB, PC, v_p, f_p, alpha_p, w_mcp, r1, r2):
     P  = PB + PC
     v1 = r1["v1"]
     v2 = r2["v2"]
-    a2 = r2["ampl"]   # instancia P2 para extraer warm start
+    a2 = r2["ampl"]
 
     print(f"\n{'─' * 60}")
     print(f"[P3] max sillones F3 | v1_bar = {v1:.1f}  v2_bar = {v2:.1f}")
 
-    ampl = _build_ampl(PB, PC, v_p, f_p)
+    ampl = _build_ampl(dias, PB, PC, v_p, f_p, alpha_p, w_mcp)
     ampl.param["v1_bar"] = v1
     ampl.param["v2_bar"] = v2
     ampl.eval("objective ChairsTotal;")
     _set_time_limit(ampl, TIME_LIMIT_P3)
 
-    # Warm start desde solucion de P2
     for p in P:
-        for d in DIAS:
+        for d in dias:
             for s in SLOTS_VISITA:
                 try:
                     ampl.var["x"][p, d, s].set_value(round(a2.var["x"][p, d, s].value() or 0))
                 except Exception:
                     pass
     for p in PB:
-        for d in DIAS:
+        for d in dias:
             for s in SLOTS_INFUSION:
                 try:
                     ampl.var["y"][p, d, s].set_value(round(a2.var["y"][p, d, s].value() or 0))
                 except Exception:
                     pass
     for p in PC:
-        for d in DIAS:
+        for d in dias:
             for s in SLOTS_INFUSION:
                 try:
                     ampl.var["zB"][p, d, s].set_value(round(a2.var["zB"][p, d, s].value() or 0))
                     ampl.var["zC"][p, d, s].set_value(round(a2.var["zC"][p, d, s].value() or 0))
                 except Exception:
                     pass
-    for d in DIAS:
+    for d in dias:
         ampl.var["aV"][d].set_value(r2["aV"][d])
         ampl.var["aI"][d].set_value(r2["aI"][d])
         ampl.var["om"][d].set_value(r2["om"][d])
@@ -519,9 +640,9 @@ def solve_p3(PB, PC, v_p, f_p, r1, r2):
         "status":  status,
         "f3":      f3 if f3 is not None else 0.0,
         "elapsed": elapsed,
-        "aV":      {d: max(0.0, ampl.var["aV"][d].value()) for d in DIAS},
-        "aI":      {d: max(0.0, ampl.var["aI"][d].value()) for d in DIAS},
-        "om":      {d: max(0.0, ampl.var["om"][d].value())  for d in DIAS},
+        "aV":      {d: max(0.0, ampl.var["aV"][d].value()) for d in dias},
+        "aI":      {d: max(0.0, ampl.var["aI"][d].value()) for d in dias},
+        "om":      {d: max(0.0, ampl.var["om"][d].value())  for d in dias},
         "ampl":    ampl,
     }
 
@@ -529,7 +650,7 @@ def solve_p3(PB, PC, v_p, f_p, r1, r2):
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTRACCION DE AGENDA FINAL
 # ─────────────────────────────────────────────────────────────────────────────
-def _extract_agenda(ampl3, PB, PC, v_p):
+def _extract_agenda(ampl3, dias, PB, PC, v_p):
     rows     = []
     complete = True
     PB_set   = set(PB)
@@ -544,7 +665,7 @@ def _extract_agenda(ampl3, PB, PC, v_p):
         found_v = False
         found_i = False
 
-        for d in DIAS:
+        for d in dias:
             for s in SLOTS_VISITA:
                 if (x_vals.get((p, d, s), 0) or 0) > 0.5:
                     fila["Dia"]                = d
@@ -590,28 +711,28 @@ def _extract_agenda(ampl3, PB, PC, v_p):
 # ─────────────────────────────────────────────────────────────────────────────
 # PIPELINE COMPLETO: P1 -> P2 -> P3
 # ─────────────────────────────────────────────────────────────────────────────
-def build_and_solve(df_input):
-    PB, PC, v_p, f_p = _prepare_data(df_input)
+def build_and_solve(dias, PB, PC, v_p, f_p, alpha_p, w_mcp):
     n = len(PB) + len(PC)
     print(f"\nPacientes totales: {n}  ({len(PB)} criticos / {len(PC)} no-criticos)")
+    print(f"Dias de trabajo: {dias}")
 
     t_start = time.time()
 
-    r1 = solve_p1(PB, PC, v_p, f_p)
+    r1 = solve_p1(dias, PB, PC, v_p, f_p, alpha_p, w_mcp)
     if r1["v1"] == float("inf"):
         print("[ERROR] P1 no encontro solucion factible.")
         return {"feasible": False}
 
-    r2 = solve_p2(PB, PC, v_p, f_p, r1)
+    r2 = solve_p2(dias, PB, PC, v_p, f_p, alpha_p, w_mcp, r1)
     if r2["v2"] == float("inf"):
         print("[ERROR] P2 no encontro solucion factible.")
         return {"feasible": False}
 
-    r3 = solve_p3(PB, PC, v_p, f_p, r1, r2)
+    r3 = solve_p3(dias, PB, PC, v_p, f_p, alpha_p, w_mcp, r1, r2)
 
     t_total = time.time() - t_start
 
-    df_agenda, complete = _extract_agenda(r3["ampl"], PB, PC, v_p)
+    df_agenda, complete = _extract_agenda(r3["ampl"], dias, PB, PC, v_p)
 
     coherent   = False
     mean_wait  = None
@@ -667,110 +788,97 @@ def build_and_solve(df_input):
 # ─────────────────────────────────────────────────────────────────────────────
 # GUARDAR AGENDA
 # ─────────────────────────────────────────────────────────────────────────────
-def save_agenda(df, src_csv, frac_label):
-    stem     = os.path.splitext(os.path.basename(src_csv))[0]
-    out_path = os.path.join(OPTIMIZED_DIR, f"agenda_{stem}_frac{frac_label}_ampl.csv")
+def save_agenda(df, stem):
+    out_path = os.path.join(OPTIMIZED_DIR, f"agenda_{stem}.csv")
     df.sort_values(["Dia", "Slot_Inicio_Visita"]).to_csv(out_path, index=False)
     return out_path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BUCLE PRINCIPAL — fracciones progresivas con criterio de aceptacion
+# BUCLE PRINCIPAL — todas las instancias reales
 # ─────────────────────────────────────────────────────────────────────────────
-def run_progressive():
-    # Activar licencia AMPL (incluye Gurobi como solver)
+def _natural_key(path):
+    m = re.search(r"(\d+)", os.path.basename(path))
+    return int(m.group(1)) if m else 10 ** 9
+
+
+def run_all():
     modules.activate(AMPL_UUID)
 
     os.makedirs(OPTIMIZED_DIR, exist_ok=True)
     os.makedirs(LOGS_DIR, exist_ok=True)
 
-    files = get_csv_files()
-    if not files:
-        print(f"No se encontraron CSV en {SIMULATED_DIR}.")
+    dat_files = sorted(glob(os.path.join(REAL_DIR, "*.dat")), key=_natural_key)
+    if not dat_files:
+        print(f"No se encontraron ficheros .dat en {REAL_DIR}.")
         return
+
+    print(f"Instancias encontradas: {len(dat_files)}")
 
     resumen = []
 
-    for i, csv_path in enumerate(files):
-        seed    = BASE_SEED + i
-        df_full = pd.read_csv(csv_path)
-        subsets = sample_prefixes(df_full, seed=seed)
-        stem    = os.path.splitext(os.path.basename(csv_path))[0]
+    for dat_path in dat_files:
+        stem = os.path.splitext(os.path.basename(dat_path))[0]
 
-        prev_wait = None
-        stop      = False
+        # El articulo trabaja con 51 instancias. Cruzando (ptot, nº criticos) con la
+        # Tabla 7, la unica de nuestras 52 que el articulo descarta es istanza14.
+        # El resto -incluida istanza52, de 3 dias- SI estan en la Tabla 7.
+        if stem in EXCLUDED_INSTANCES:
+            print(f"[SKIP] {stem}: descartada (no figura en la Tabla 7 del articulo).")
+            continue
 
-        for frac_label, _ in FRACCIONES:
-            if stop:
-                break
+        log_path = os.path.join(LOGS_DIR, f"run_{stem}.txt")
 
-            log_path = os.path.join(LOGS_DIR, f"run_{stem}_frac{frac_label}.txt")
-            df_part  = subsets[frac_label]
+        with Tee(log_path):
+            print("=" * 70)
+            print(f"INSTANCIA : {stem}  [datos reales, AMPL + Gurobi]")
+            print(f"FICHERO   : {dat_path}")
+            print(f"FECHA     : {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print("=" * 70)
 
-            with Tee(log_path):
-                print("=" * 70)
-                print(f"INSTANCIA : {stem}  [AMPL + Gurobi]")
-                print(f"FRACCION  : {frac_label}  |  N = {len(df_part)}  |  seed = {seed}")
-                print(f"FECHA     : {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                print("=" * 70)
+            dat = parse_dat(dat_path)
+            dias, PB, PC, v_p, f_p, alpha_p, w_mcp = prepare_instance(dat)
 
-                res = build_and_solve(df_part)
+            print(f"giornilav = {dat['giornilav']}  |  ptot = {len(dat['patients'])}")
+            print(f"Entradas MCP (w): {len(w_mcp)}")
 
-                accepted = False
-                reason   = ""
+            res = build_and_solve(dias, PB, PC, v_p, f_p, alpha_p, w_mcp)
 
-                if not res.get("feasible"):
-                    reason = "infeasible_o_incoherente"
-                    stop   = True
-                else:
-                    mw = res["mean_wait"]
-                    if prev_wait is None:
-                        accepted, reason = True, "primera_solucion_factible"
-                    elif mw <= prev_wait:
-                        accepted, reason = True, "factible_mejora_espera"
-                    else:
-                        reason = "factible_sin_mejora"
-                        stop   = True
+            out_path = None
+            if res.get("feasible"):
+                out_path = save_agenda(res["results_df"], stem)
+                print(f"Agenda guardada: {out_path}")
+            else:
+                print("[WARN] Instancia sin solucion coherente — no se guarda agenda.")
 
-                print(f"\n{'─' * 70}")
-                print(f"DECISION  : {'ACEPTADA' if accepted else 'RECHAZADA'}  ({reason})")
-
-                out_path = None
-                if accepted:
-                    out_path  = save_agenda(res["results_df"], csv_path, frac_label)
-                    prev_wait = res["mean_wait"]
-                    print(f"Agenda guardada: {out_path}")
-
-            resumen.append({
-                "archivo":            os.path.basename(csv_path),
-                "fraccion":           frac_label,
-                "seed":               seed,
-                "n_pacientes":        res.get("n_patients",  0),
-                "n_criticos":         res.get("n_critical",  0),
-                "status_p1":          res.get("status_p1",   "N/A"),
-                "status_p2":          res.get("status_p2",   "N/A"),
-                "status_p3":          res.get("status_p3",   "N/A"),
-                "f1_overtime_slots":  res.get("f1",          float("nan")),
-                "f2_maxwait_slots":   res.get("f2",          float("nan")),
-                "f3_sillones":        res.get("f3",          float("nan")),
-                "pct_sillon":         res.get("pct_sillon",  float("nan")),
-                "espera_media_min":   res.get("mean_wait",   float("nan")),
-                "t_p1_s":             res.get("elapsed_p1",  float("nan")),
-                "t_p2_s":             res.get("elapsed_p2",  float("nan")),
-                "t_p3_s":             res.get("elapsed_p3",  float("nan")),
-                "t_total_s":          res.get("elapsed",     float("nan")),
-                "aceptada":           accepted,
-                "motivo":             reason,
-                "log":                log_path,
-                "agenda":             out_path or "",
-            })
+        resumen.append({
+            "instancia":          stem,
+            "giornilav":          dat["giornilav"],
+            "n_pacientes":        res.get("n_patients",  0),
+            "n_criticos":         res.get("n_critical",  0),
+            "status_p1":          res.get("status_p1",   "N/A"),
+            "status_p2":          res.get("status_p2",   "N/A"),
+            "status_p3":          res.get("status_p3",   "N/A"),
+            "f1_overtime_slots":  res.get("f1",          float("nan")),
+            "f2_maxwait_slots":   res.get("f2",          float("nan")),
+            "f3_sillones":        res.get("f3",          float("nan")),
+            "pct_sillon":         res.get("pct_sillon",  float("nan")),
+            "espera_media_min":   res.get("mean_wait",   float("nan")),
+            "t_p1_s":             res.get("elapsed_p1",  float("nan")),
+            "t_p2_s":             res.get("elapsed_p2",  float("nan")),
+            "t_p3_s":             res.get("elapsed_p3",  float("nan")),
+            "t_total_s":          res.get("elapsed",     float("nan")),
+            "coherente":          res.get("coherent",    False),
+            "log":                log_path,
+            "agenda":             out_path or "",
+        })
 
     df_res   = pd.DataFrame(resumen)
-    res_path = os.path.join(OPTIMIZED_DIR, "resumen_ejecucion_ampl.csv")
+    res_path = os.path.join(OPTIMIZED_DIR, "resumen_ejecucion_real.csv")
     df_res.to_csv(res_path, index=False)
     print(f"\nResumen global guardado en: {res_path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    run_progressive()
+    run_all()

@@ -227,3 +227,15 @@ MODELO.md
 logs/
 logs-ampl/
 Databases/optimized-sets/
+Databases/real-sets/
+Databases/optimized-sets-real/
+Databases/optimized-sets-real-debug/
+logs-real/
+logs-real-debug/
+analisis-datos-reales.md
+analisis-resultados-gurobi.md
+tfg-problematica-mcp-festivos.md
+
+
+
+model-solver-real-debug.py
