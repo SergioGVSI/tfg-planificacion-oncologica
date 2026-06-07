@@ -235,7 +235,9 @@ logs-real-debug/
 analisis-datos-reales.md
 analisis-resultados-gurobi.md
 tfg-problematica-mcp-festivos.md
+tfg-resolucion-y-aceleracion.md
 
 
-
+model-solver-toy.py
+model-solver-toy-peor.py
 model-solver-real-debug.py

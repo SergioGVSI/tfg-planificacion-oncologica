@@ -253,35 +253,28 @@ def build_nsalas(g, c_map, w, demanda_k=None):
     El MCP w esta indexado por dia NATURAL de semana (1=lunes .. 5=viernes) y trae
     siempre 5 columnas (30 bloques = 6 salas x 5 dias), aun en semanas con festivo.
     El modelo trabaja con dias laborables 1..g, y el bloque del articulo se define
-    sobre (sala, dia LABORABLE). El tratamiento de los festivos se deduce asi:
+    sobre (sala, dia LABORABLE). El tratamiento de los festivos:
 
     - El articulo (§5.5) reporta overtime>0 en sus semanas con festivo (11,16,17),
-      NO overtime 0: los festivos generan ESCASEZ de salas. Punto de partida: los
-      bloques del dia festivo se descartan (solo cuentan los dias trabajados).
-    - El MCP se redefine mensualmente segun la demanda; en una semana con festivo
-      esa redefinicion redistribuye bloques entre patologias. Lo reproducimos con un
-      REBALANCEO por deficit/holgura: si una patologia no tiene salas suficientes
-      para su demanda (deficit), se le da una sala quitandosela a una patologia con
-      holgura EN EL MISMO DIA. El swap conserva el tope de MAX_SALAS_DIA salas/dia.
+      NO overtime 0: los festivos generan ESCASEZ de salas.
+    - El MCP se redefine mensualmente segun la demanda; en una semana con festivo esa
+      redefinicion redistribuye los bloques. Lo reproducimos REPARTIENDO las
+      MAX_SALAS_DIA salas de cada dia laborable entre las 7 patologias de forma que se
+      MINIMICE el deficit total de slots de visita regulares. El deficit total de
+      visitas (sum_k max(0, demanda_k - NV*salas_k)) es la cota inferior del overtime
+      de visitas (= LB1), asi que minimizarlo equivale a buscar el reparto del MCP que
+      el articulo usa para esa semana (el que da el menor overtime posible).
 
-    `demanda_k[k]` = suma de slots de visita de la patologia k (para calcular el
-    nº minimo de salas necesarias = ceil(demanda / |SV|)). Si es None, no se
-    rebalancea (solo se descartan festivos).
-
-    Esta regla reproduce la factibilidad-con-overtime del articulo. Si tras el
-    rebalanceo aun queda deficit (no hay holgura suficiente), la instancia no es
-    reproducible con el MCP disponible (ver EXCLUDED_INSTANCES).
+    `demanda_k[k]` = suma de slots de visita de la patologia k. Si es None, no se
+    rebalancea (solo se descartan los bloques del festivo).
     """
-    import math
-
     nat_to_lab = {c_map[i]: i for i in c_map}
     weekdays   = set(c_map.values())
     labs       = list(range(1, g + 1))
-    SV_LEN     = len(SLOTS_VISITA)  # 48 (capacidad maxima de una sala-dia con overtime)
 
     # salas por (k, dia_natural)
     salas_nat = {}
-    for (r, k, d), val in w.items():
+    for (_r, k, d), val in w.items():
         salas_nat[(k, d)] = salas_nat.get((k, d), 0) + val
 
     # Base: solo dias trabajados, reindexados a dia laborable
@@ -294,36 +287,49 @@ def build_nsalas(g, c_map, w, demanda_k=None):
     if not (set(range(1, 6)) - weekdays) or demanda_k is None:
         return nsalas
 
-    def salas_pat(k):
-        return sum(nsalas[(k, lab)] for lab in labs)
+    # ── Reparto optimo: minimizar el deficit de slots de visita regulares ──
+    # Se reparten las MAX_SALAS_DIA salas de CADA dia laborable. La demanda y la
+    # capacidad regular son agregadas por patologia (NV slots por sala-dia), asi que
+    # solo importa el nº TOTAL de salas-dia que recibe cada patologia en la semana.
+    # Reparto greedy: cada sala-dia se asigna a la patologia donde mas reduce su
+    # deficit regular (la de mayor demanda restante por cubrir). Optimo porque la
+    # funcion deficit es separable y la ganancia marginal de cada sala es constante
+    # (NV) hasta cubrir la demanda.
+    total_salas = MAX_SALAS_DIA * g
+    salas_k = {k: 0 for k in range(1, 8)}
 
-    def salas_min(k):
-        return math.ceil(demanda_k.get(k, 0) / SV_LEN) if demanda_k.get(k, 0) else 0
+    def deficit_restante(k):
+        return demanda_k.get(k, 0) - NV * salas_k[k]
 
-    # Rebalanceo: dar salas a patologias en deficit quitandolas de las que sobran.
-    # Tope de iteraciones por seguridad (a lo sumo |K|*|labs| movimientos utiles).
-    for _ in range(len(labs) * 7):
-        deficit = [k for k in range(1, 8) if salas_pat(k) < salas_min(k)]
-        if not deficit:
+    # Se reparten TODAS las salas disponibles (6 por dia). Mientras quede deficit, la
+    # sala va a la patologia que mas lo reduce; cuando ya no hay deficit, las salas
+    # sobrantes van a las patologias con mas demanda (no se desperdician: el centro
+    # tiene 6 salas todos los dias laborables).
+    for _ in range(total_salas):
+        con_deficit = [k for k in range(1, 8) if deficit_restante(k) > 0]
+        if con_deficit:
+            k_best = max(con_deficit, key=deficit_restante)
+        else:
+            k_best = max(range(1, 8), key=lambda kk: demanda_k.get(kk, 0))
+        salas_k[k_best] += 1
+
+    # Reconstruir nsalas[k,d] colocando salas_k[k] salas repartidas por dias,
+    # respetando MAX_SALAS_DIA salas por dia.
+    nsalas = {(k, lab): 0 for k in range(1, 8) for lab in labs}
+    # Lista de (patologia) repetida salas_k[k] veces, ordenada por demanda desc
+    cola = []
+    for k in sorted(range(1, 8), key=lambda kk: -demanda_k.get(kk, 0)):
+        cola += [k] * salas_k[k]
+    # Repartir round-robin por dias para no exceder MAX_SALAS_DIA/dia
+    carga_dia = {lab: 0 for lab in labs}
+    for k in cola:
+        # dia con menos carga y hueco
+        d = min((lab for lab in labs if carga_dia[lab] < MAX_SALAS_DIA),
+                key=lambda lab: carga_dia[lab], default=None)
+        if d is None:
             break
-        k_need = deficit[0]
-        donante = None
-        for d in labs:
-            # patologia con sala ese dia y holgura, distinta de la receptora,
-            # y que la receptora no tenga ya sala ese dia (evita acumular en mismo dia)
-            for k_don in range(1, 8):
-                if (k_don != k_need and nsalas[(k_don, d)] > 0
-                        and salas_pat(k_don) > salas_min(k_don)
-                        and nsalas[(k_need, d)] == 0):
-                    donante = (k_don, d)
-                    break
-            if donante:
-                break
-        if donante is None:
-            break  # no hay holgura: deficit irreparable
-        k_don, d = donante
-        nsalas[(k_don, d)] -= 1
-        nsalas[(k_need, d)] += 1
+        nsalas[(k, d)] += 1
+        carga_dia[d] += 1
     return nsalas
 
 
@@ -447,6 +453,65 @@ def _day_assignments(x_vals, P, dias):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# LOWER BOUND LB1 — Procedimiento 1 del articulo (§4.1)
+# ─────────────────────────────────────────────────────────────────────────────
+def compute_lb1(dias, PB, PC, v_p, f_p, alpha_p, nsalas):
+    """Calcula una cota inferior valida del overtime F1 (desigualdad F1 >= LB1).
+
+    Procedimiento 1 del articulo (§4.1). Se combinan DOS cotas inferiores validas y se
+    toma el maximo (la mas fuerte):
+
+      (a) COTA DE CONTEO. Para cada patologia k en DEFICIT (la demanda de slots de visita
+          supera la capacidad regular NV * nº_salas), el exceso de demanda sobre la
+          capacidad regular debe ir necesariamente a overtime. La suma de excesos sobre
+          las patologias en deficit es una cota inferior del overtime de visitas, y por
+          tanto de F1. Es robusta y no depende del solver.
+
+      (b) COTA LP. Relajacion continua de P1 restringida a los pacientes de las
+          patologias en deficit, con camas y sillones ilimitados (variables binarias en
+          [0,1]). Es la que describe literalmente el articulo; en instancias grandes
+          aprieta mas que la de conteo, en pequenas suele ser mas floja.
+
+    Devuelve (lb1, info) con detalles para el log.
+    """
+    P = PB + PC
+
+    # Patologias en deficit y demanda/capacidad por patologia
+    salas_k = {k: sum(nsalas.get((k, d), 0) for d in dias) for k in range(1, 8)}
+    dem_k   = {k: 0 for k in range(1, 8)}
+    for p in P:
+        dem_k[alpha_p[p]] += v_p[p]
+    K_bar = [k for k in range(1, 8) if NV * salas_k[k] < dem_k[k]]
+
+    if not K_bar:
+        return 0.0, {"K_bar": [], "n_pbar": 0, "lb_conteo": 0.0, "lb_lp": 0.0}
+
+    # (a) Cota de conteo: suma de excesos de demanda sobre capacidad regular
+    lb_conteo = sum(max(0, dem_k[k] - NV * salas_k[k]) for k in K_bar)
+
+    # (b) Cota LP: relajacion continua sobre los pacientes en deficit
+    P_bar  = [p for p in P if alpha_p[p] in K_bar]
+    PB_bar = [p for p in P_bar if p in PB]
+    PC_bar = [p for p in P_bar if p in PC]
+
+    ampl = _build_ampl(dias, PB_bar, PC_bar, v_p, f_p, alpha_p, nsalas)
+    ampl.eval("drop eps_f1; drop eps_f2;")
+    ampl.param["RSILL"] = 10 ** 6   # camas/sillones ilimitados (la cota mira las VISITAS)
+    ampl.param["RCAMA"] = 10 ** 6
+    ampl.option["relax_integrality"] = 1
+    ampl.eval("objective OvertimeTotal;")
+    ampl.option["gurobi_options"] = "outlev=0"
+    ampl.solve()
+    lb_lp = _obj_value(ampl, "OvertimeTotal")
+    lb_lp = max(0.0, lb_lp) if lb_lp is not None else 0.0
+
+    lb1 = max(lb_conteo, lb_lp)
+    info = {"K_bar": K_bar, "n_pbar": len(P_bar),
+            "lb_conteo": lb_conteo, "lb_lp": lb_lp}
+    return lb1, info
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PROBLEMA 1 — min F1
 # ─────────────────────────────────────────────────────────────────────────────
 def solve_p1(dias, PB, PC, v_p, f_p, alpha_p, w_mcp):
@@ -454,9 +519,18 @@ def solve_p1(dias, PB, PC, v_p, f_p, alpha_p, w_mcp):
     print(f"\n{'─' * 60}")
     print(f"[P1] min overtime F1 | {len(PB)} criticos  {len(PC)} no-criticos")
 
+    # Lower bound LB1 (Procedimiento 1): desigualdad valida F1 >= LB1 para acelerar P1
+    lb1, lb1_info = compute_lb1(dias, PB, PC, v_p, f_p, alpha_p, w_mcp)
+    print(f"[P1] LB1 = {lb1:.1f}  (conteo={lb1_info['lb_conteo']:.1f} "
+          f"lp={lb1_info['lb_lp']:.1f} | deficit={lb1_info['K_bar']} "
+          f"{lb1_info['n_pbar']} pac)")
+
     ampl = _build_ampl(dias, PB, PC, v_p, f_p, alpha_p, w_mcp)
     ampl.eval("drop eps_f1; drop eps_f2;")
     ampl.eval("objective OvertimeTotal;")
+    # Desigualdad valida F1 >= LB1 (cota inferior del overtime)
+    if lb1 > 0:
+        ampl.eval(f"subject to lb1_cut: sum{{d in D}} (aV[d] + aI[d]) >= {lb1};")
     _set_time_limit(ampl, TIME_LIMIT_P1)
 
     t0 = time.time()
