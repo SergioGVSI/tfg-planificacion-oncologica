@@ -221,7 +221,7 @@ __marimo__/
 backups/
 .vscode/
 .claude/
-docs/
+
 CLAUDE.md
 MODELO.md
 logs/
@@ -232,6 +232,7 @@ Databases/optimized-sets-real/
 Databases/optimized-sets-real-debug/
 logs-real/
 logs-real-debug/
+docs/
 analisis-datos-reales.md
 analisis-resultados-gurobi.md
 tfg-problematica-mcp-festivos.md
@@ -241,3 +242,5 @@ tfg-resolucion-y-aceleracion.md
 model-solver-toy.py
 model-solver-toy-peor.py
 model-solver-real-debug.py
+
+*.md

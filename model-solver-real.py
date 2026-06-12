@@ -247,109 +247,171 @@ def parse_dat(path):
 MAX_SALAS_DIA = 6  # nº de salas fisicas del centro (no se puede exceder por dia)
 
 
-def build_nsalas(g, c_map, w, demanda_k=None):
-    """Construye nsalas[(k, dia_laborable)] = nº de salas asignadas a la patologia k.
+# ─────────────────────────────────────────────────────────────────────────────
+# MCP — OPCION C (sesion2/tfg-fidelidad-datos-y-cota-lb1.md §12.7)
+# ─────────────────────────────────────────────────────────────────────────────
+# El MCP del articulo se define al inicio de cada MES, dimensionado al maximo semanal
+# de solicitudes de ese mes, y se mantiene FIJO (cambia solo cada 3 meses; §5.1, §5.5).
+# El MCP de los .dat es ese MCP mensual (la "firma" de bloques por patologia es constante
+# en bloques de 4-9 semanas = meses), pero esta MAL BALANCEADO: en los 10 meses infra-asigna
+# a la patologia pico (casi siempre HE) y deja deficit -> overtime que el articulo no tiene
+# (e infactibilidad en istanza31). Un MCP mensual de 0 deficit SI cabe en las 30 plazas en
+# los 10 meses, asi que se RE-BALANCEA una vez por mes (no por semana, que romperia la
+# fijeza). En las semanas con festivo se mantiene el MCP mensual fijo y se PIERDE el dia
+# festivo (mecanismo del articulo).
 
-    El MCP w esta indexado por dia NATURAL de semana (1=lunes .. 5=viernes) y trae
-    siempre 5 columnas (30 bloques = 6 salas x 5 dias), aun en semanas con festivo.
-    El modelo trabaja con dias laborables 1..g, y el bloque del articulo se define
-    sobre (sala, dia LABORABLE). El tratamiento de los festivos:
+def _firma(w):
+    """Bloques por patologia (k=1..7) del MCP crudo. Constante dentro de cada mes, por lo
+    que sirve para agrupar las semanas en periodos = meses."""
+    cnt = {k: 0 for k in range(1, 8)}
+    for (_r, k, _d), val in w.items():
+        cnt[k] += val
+    return tuple(cnt[k] for k in range(1, 8))
 
-    - El articulo (§5.5) reporta overtime>0 en sus semanas con festivo (11,16,17),
-      NO overtime 0: los festivos generan ESCASEZ de salas.
-    - El MCP se redefine mensualmente segun la demanda; en una semana con festivo esa
-      redefinicion redistribuye los bloques. Lo reproducimos REPARTIENDO las
-      MAX_SALAS_DIA salas de cada dia laborable entre las 7 patologias de forma que se
-      MINIMICE el deficit total de slots de visita regulares. El deficit total de
-      visitas (sum_k max(0, demanda_k - NV*salas_k)) es la cota inferior del overtime
-      de visitas (= LB1), asi que minimizarlo equivale a buscar el reparto del MCP que
-      el articulo usa para esa semana (el que da el menor overtime posible).
 
-    `demanda_k[k]` = suma de slots de visita de la patologia k. Si es None, no se
-    rebalancea (solo se descartan los bloques del festivo).
-    """
-    nat_to_lab = {c_map[i]: i for i in c_map}
-    weekdays   = set(c_map.values())
-    labs       = list(range(1, g + 1))
-
-    # salas por (k, dia_natural)
-    salas_nat = {}
-    for (_r, k, d), val in w.items():
-        salas_nat[(k, d)] = salas_nat.get((k, d), 0) + val
-
-    # Base: solo dias trabajados, reindexados a dia laborable
-    nsalas = {(k, lab): 0 for k in range(1, 8) for lab in labs}
-    for (k, d_nat), val in salas_nat.items():
-        if d_nat in weekdays:
-            nsalas[(k, nat_to_lab[d_nat])] += val
-
-    # Sin festivo (semana completa) o sin demanda: no se rebalancea
-    if not (set(range(1, 6)) - weekdays) or demanda_k is None:
-        return nsalas
-
-    # ── Reparto optimo: minimizar el deficit de slots de visita regulares ──
-    # Se reparten las MAX_SALAS_DIA salas de CADA dia laborable. La demanda y la
-    # capacidad regular son agregadas por patologia (NV slots por sala-dia), asi que
-    # solo importa el nº TOTAL de salas-dia que recibe cada patologia en la semana.
-    # Reparto greedy: cada sala-dia se asigna a la patologia donde mas reduce su
-    # deficit regular (la de mayor demanda restante por cubrir). Optimo porque la
-    # funcion deficit es separable y la ganancia marginal de cada sala es constante
-    # (NV) hasta cubrir la demanda.
-    total_salas = MAX_SALAS_DIA * g
+def _alloc_salas(demanda_k):
+    """Reparte las 30 salas-dia de una semana completa (6 salas x 5 dias) entre las 7
+    patologias minimizando el deficit de slots de visita regulares respecto a demanda_k
+    (= PICO de demanda del mes). Greedy: cada sala va a la patologia de mayor deficit
+    restante; cubierto el deficit, las sobrantes a las de mayor demanda. Optimo porque el
+    deficit es separable y la ganancia marginal de cada sala es constante (NV)."""
     salas_k = {k: 0 for k in range(1, 8)}
 
     def deficit_restante(k):
         return demanda_k.get(k, 0) - NV * salas_k[k]
 
-    # Se reparten TODAS las salas disponibles (6 por dia). Mientras quede deficit, la
-    # sala va a la patologia que mas lo reduce; cuando ya no hay deficit, las salas
-    # sobrantes van a las patologias con mas demanda (no se desperdician: el centro
-    # tiene 6 salas todos los dias laborables).
-    for _ in range(total_salas):
+    for _ in range(MAX_SALAS_DIA * 5):
         con_deficit = [k for k in range(1, 8) if deficit_restante(k) > 0]
         if con_deficit:
             k_best = max(con_deficit, key=deficit_restante)
         else:
             k_best = max(range(1, 8), key=lambda kk: demanda_k.get(kk, 0))
         salas_k[k_best] += 1
+    return salas_k
 
-    # Reconstruir nsalas[k,d] colocando salas_k[k] salas repartidas por dias,
-    # respetando MAX_SALAS_DIA salas por dia.
-    nsalas = {(k, lab): 0 for k in range(1, 8) for lab in labs}
-    # Lista de (patologia) repetida salas_k[k] veces, ordenada por demanda desc
-    cola = []
-    for k in sorted(range(1, 8), key=lambda kk: -demanda_k.get(kk, 0)):
-        cola += [k] * salas_k[k]
-    # Repartir round-robin por dias para no exceder MAX_SALAS_DIA/dia
-    carga_dia = {lab: 0 for lab in labs}
-    for k in cola:
-        # dia con menos carga y hueco
-        d = min((lab for lab in labs if carga_dia[lab] < MAX_SALAS_DIA),
-                key=lambda lab: carga_dia[lab], default=None)
-        if d is None:
-            break
-        nsalas[(k, d)] += 1
-        carga_dia[d] += 1
+
+def _optimize_layout(salas_k, weeks):
+    """Elige el reparto del MCP mensual FIJO por dia natural (layout[k,d]) que MINIMIZA el
+    overtime de visita del periodo, manteniendo fijos los totales por patologia salas_k.
+
+    Es la parte de la Opcion C que el articulo NO publica (su layout concreto, fijado por
+    el procedimiento tactico de Carello et al. 2022, que no minimiza overtime). Al ser
+    desconocido, elegimos el layout racional: el que minimiza el overtime de visita total
+    bajo la restriccion de MCP mensual fijo. Solo afecta a las semanas con festivo (las de
+    5 dias usan los 5 dias -> deficit 0 con cualquier layout).
+
+    weeks = lista de (dias_naturales_trabajados:set, demanda_por_patologia:dict) del periodo.
+    MILP (Gurobi): min suma de deficits de visita por (patologia, semana), s.a. totales por
+    patologia fijos, <= MAX_SALAS_DIA salas/dia, y factibilidad (dem <= |SV|*salas en dias
+    trabajados) en cada semana. Devuelve layout[(k, dia_natural)] = nº salas."""
+    ampl = AMPL()
+    ampl.eval("""
+        set K; set DN; set W;
+        param salas{K} integer >= 0;
+        param dem{K, W} >= 0;
+        param worked{W, DN} binary;
+        param NVp; param SVmax; param MAXD;
+        var L{K, DN} integer >= 0;
+        var defi{K, W} >= 0;
+        var sobre{K, DN} >= 0;          # bloques de k por encima de 1 en un dia (balanceo)
+        # Objetivo: PRIMARIO minimizar overtime de visita del periodo; SECUNDARIO (peso
+        # pequeno) esparcir cada patologia entre dias. El balanceo evita layouts concentrados
+        # arbitrarios en periodos sin festivo (donde el overtime es 0 con cualquier reparto),
+        # que dificultan a P1 encontrar la solucion de 0 overtime.
+        minimize Obj:
+            1000 * sum{k in K, w in W} defi[k,w] + sum{k in K, d in DN} sobre[k,d];
+        subject to total{k in K}: sum{d in DN} L[k,d] = salas[k];
+        subject to cap{d in DN}:  sum{k in K} L[k,d] <= MAXD;
+        subject to defc{k in K, w in W}:
+            defi[k,w] >= dem[k,w] - NVp * sum{d in DN} worked[w,d]*L[k,d];
+        subject to feas{k in K, w in W}:
+            SVmax * sum{d in DN} worked[w,d]*L[k,d] >= dem[k,w];
+        subject to spread{k in K, d in DN}: sobre[k,d] >= L[k,d] - 1;
+    """)
+    K = list(range(1, 8)); DN = list(range(1, 6)); W = list(range(len(weeks)))
+    ampl.set["K"] = K; ampl.set["DN"] = DN; ampl.set["W"] = W
+    ampl.param["salas"]  = {k: salas_k[k] for k in K}
+    ampl.param["NVp"]    = NV
+    ampl.param["SVmax"]  = len(SLOTS_VISITA)   # |SV| = 48 (techo absoluto/sala/dia)
+    ampl.param["MAXD"]   = MAX_SALAS_DIA
+    ampl.param["dem"]    = {(k, w): weeks[w][1].get(k, 0) for k in K for w in W}
+    ampl.param["worked"] = {(w, d): (1 if d in weeks[w][0] else 0)
+                            for w in W for d in DN}
+    ampl.option["solver"] = "gurobi"
+    ampl.option["gurobi_options"] = "outlev=0 mipgap=0"
+    ampl.solve()
+
+    if "infeasible" in ampl.get_value("solve_result").lower():
+        raise RuntimeError("layout mensual infactible: la demanda de algun periodo no cabe "
+                           "en 30 salas-dia tras perder el dia festivo")
+
+    df = ampl.var["L"].get_values().to_pandas().reset_index()
+    layout = {(k, d): 0 for k in K for d in DN}
+    for row in df.values:
+        layout[(int(row[0]), int(row[1]))] = int(round(row[-1]))
+    return layout
+
+
+def build_period_mcps(dat_paths):
+    """OPCION C: reconstruye un MCP MENSUAL FIJO por periodo (firma del MCP crudo constante
+    = un mes), dimensionado al PICO de demanda del periodo, con reparto por dia natural fijo.
+    Es el metodo del propio articulo (MCP mensual al maximo semanal, fijo) pero re-balanceado.
+
+    Devuelve {stem: layout} con layout[(k, dia_natural)] = nº salas, el MISMO para todas las
+    semanas del mes. En cada semana se descartan luego los bloques del dia festivo."""
+    info = []
+    for path in dat_paths:
+        stem = os.path.splitext(os.path.basename(path))[0]
+        dat = parse_dat(path)
+        dem = {k: 0 for k in range(1, 8)}
+        for p in dat["patients"]:
+            dem[p["alpha"]] = dem.get(p["alpha"], 0) + p["v"]
+        g = dat["giornilav"]
+        c_map = dat["c_map"] or {i: i for i in range(1, g + 1)}
+        festivos = set(range(1, 6)) - set(c_map.values())
+        info.append({"stem": stem, "firma": _firma(dat["w"]),
+                     "dem": dem, "festivos": festivos})
+
+    # agrupar por firma consecutiva (= mes)
+    periodos = []
+    for it in info:
+        if not periodos or periodos[-1]["firma"] != it["firma"]:
+            periodos.append({"firma": it["firma"], "items": []})
+        periodos[-1]["items"].append(it)
+
+    layout_by_stem = {}
+    for per in periodos:
+        maxdem  = {k: max(it["dem"][k] for it in per["items"]) for k in range(1, 8)}
+        salas_k = _alloc_salas(maxdem)
+        # semanas del periodo: (dias naturales trabajados, demanda por patologia)
+        weeks  = [(set(range(1, 6)) - it["festivos"], it["dem"]) for it in per["items"]]
+        layout = _optimize_layout(salas_k, weeks)
+        for it in per["items"]:
+            layout_by_stem[it["stem"]] = layout
+    return layout_by_stem
+
+
+def _nsalas_from_layout(layout, g, c_map):
+    """Convierte el layout mensual (por dia natural) en nsalas[(k, dia_laborable)] de una
+    semana, descartando los bloques del dia FESTIVO (los dias naturales no trabajados)."""
+    nsalas = {(k, lab): 0 for k in range(1, 8) for lab in range(1, g + 1)}
+    for lab in range(1, g + 1):
+        d_nat = c_map[lab]
+        for k in range(1, 8):
+            nsalas[(k, lab)] = layout.get((k, d_nat), 0)
     return nsalas
 
 
-def prepare_instance(dat):
-    """Convierte el resultado de parse_dat en las estructuras que necesita el solver.
-
-    Devuelve nsalas[(k, d)] = sum_r w[r,k,d] del articulo, ya reindexado a dia
-    laborable mediante build_nsalas (acumulando los bloques de dias festivos).
-    """
+def prepare_instance(dat, monthly_layout):
+    """Convierte parse_dat en las estructuras del solver. nsalas se construye a partir del
+    MCP MENSUAL FIJO del periodo (Opcion C, build_period_mcps), descartando el dia festivo
+    en las semanas de 4 dias."""
     g    = dat["giornilav"]
     dias = list(range(1, g + 1))
     # c_map por defecto = identidad (semana sin festivos)
     c_map = dat["c_map"] or {i: i for i in dias}
 
-    # Demanda de slots de visita por patologia (para el rebalanceo del MCP)
-    demanda_k = {}
-    for p in dat["patients"]:
-        demanda_k[p["alpha"]] = demanda_k.get(p["alpha"], 0) + p["v"]
-
-    nsalas = build_nsalas(g, c_map, dat["w"], demanda_k)
+    nsalas = _nsalas_from_layout(monthly_layout, g, c_map)
 
     PB, PC = [], []
     v_p, f_p, alpha_p = {}, {}, {}
@@ -456,21 +518,28 @@ def _day_assignments(x_vals, P, dias):
 # LOWER BOUND LB1 — Procedimiento 1 del articulo (§4.1)
 # ─────────────────────────────────────────────────────────────────────────────
 def compute_lb1(dias, PB, PC, v_p, f_p, alpha_p, nsalas):
-    """Calcula una cota inferior valida del overtime F1 (desigualdad F1 >= LB1).
+    """Calcula una cota inferior VALIDA del overtime F1 (desigualdad valida F1 >= LB1).
 
-    Procedimiento 1 del articulo (§4.1). Se combinan DOS cotas inferiores validas y se
-    toma el maximo (la mas fuerte):
+    Procedimiento 1 del articulo (§4.1), con la correccion verificada en
+    sesion2/tfg-fidelidad-datos-y-cota-lb1.md §9:
 
-      (a) COTA DE CONTEO. Para cada patologia k en DEFICIT (la demanda de slots de visita
-          supera la capacidad regular NV * nº_salas), el exceso de demanda sobre la
-          capacidad regular debe ir necesariamente a overtime. La suma de excesos sobre
-          las patologias en deficit es una cota inferior del overtime de visitas, y por
-          tanto de F1. Es robusta y no depende del solver.
+      - El articulo define LB1 = optimo de la relajacion continua (r1) de P1, restringida
+        a los pacientes de las patologias en DEFICIT (NV*salas_k < dem_k), con sillones y
+        camas ilimitados. Esa cota es VALIDA (nunca recorta el optimo) pero, tal cual,
+        sale 0 en las 51 instancias: la restriccion de overtime (9a) es POR PACIENTE y el
+        LP esparce las visitas fraccionadas para que ningun paciente la viole (cota vacua).
 
-      (b) COTA LP. Relajacion continua de P1 restringida a los pacientes de las
-          patologias en deficit, con camas y sillones ilimitados (variables binarias en
-          [0,1]). Es la que describe literalmente el articulo; en instancias grandes
-          aprieta mas que la de conteo, en pequenas suele ser mas floja.
+      - ARREGLO: se refuerza (r1) con una desigualdad VALIDA agregada por (patologia, dia)
+            aV[d] >= ( sum_{p: alpha=k} vp[p] * sum_s x[p,d,s] ) / nsalas[k,d] - NV
+        que captura el argumento de capacidad sin la dilucion fraccionaria: la sala mas
+        cargada de la patologia k el dia d acaba en un slot >= carga/nsalas[k,d]. LB1 es el
+        optimo de (r1) reforzado, y es la cota que se impone como F1 >= LB1.
+
+    lb_conteo (= suma de deficits por patologia) NO es una cota valida (F1 es suma de
+    MAXIMOS diarios, no de citas en overtime; las salas de una patologia desbordan en
+    PARALELO y el maximo entre patologias del mismo dia absorbe los menores), por lo que
+    puede SUPERAR el optimo real y recortarlo. Se calcula SOLO como cross-check de log;
+    NUNCA se impone como corte.
 
     Devuelve (lb1, info) con detalles para el log.
     """
@@ -486,10 +555,11 @@ def compute_lb1(dias, PB, PC, v_p, f_p, alpha_p, nsalas):
     if not K_bar:
         return 0.0, {"K_bar": [], "n_pbar": 0, "lb_conteo": 0.0, "lb_lp": 0.0}
 
-    # (a) Cota de conteo: suma de excesos de demanda sobre capacidad regular
+    # Cross-check informativo (NO valido, NO se impone): suma de deficits por patologia
     lb_conteo = sum(max(0, dem_k[k] - NV * salas_k[k]) for k in K_bar)
 
-    # (b) Cota LP: relajacion continua sobre los pacientes en deficit
+    # Cota LP REFORZADA: relajacion continua (r1) sobre los pacientes en deficit, con la
+    # desigualdad valida agregada por (patologia, dia) que evita la dilucion fraccionaria.
     P_bar  = [p for p in P if alpha_p[p] in K_bar]
     PB_bar = [p for p in P_bar if p in PB]
     PC_bar = [p for p in P_bar if p in PC]
@@ -498,6 +568,11 @@ def compute_lb1(dias, PB, PC, v_p, f_p, alpha_p, nsalas):
     ampl.eval("drop eps_f1; drop eps_f2;")
     ampl.param["RSILL"] = 10 ** 6   # camas/sillones ilimitados (la cota mira las VISITAS)
     ampl.param["RCAMA"] = 10 ** 6
+    # Desigualdad valida agregada que refuerza la (9a) por-paciente (que el LP diluiria):
+    ampl.eval(
+        "subject to lb1_vis_agg{k in K, d in D: nsalas[k,d] >= 1}:"
+        " aV[d] >= (sum{p in P, s in SV: alpha[p] = k} vp[p]*x[p,d,s]) / nsalas[k,d] - NV;"
+    )
     ampl.option["relax_integrality"] = 1
     ampl.eval("objective OvertimeTotal;")
     ampl.option["gurobi_options"] = "outlev=0"
@@ -505,7 +580,8 @@ def compute_lb1(dias, PB, PC, v_p, f_p, alpha_p, nsalas):
     lb_lp = _obj_value(ampl, "OvertimeTotal")
     lb_lp = max(0.0, lb_lp) if lb_lp is not None else 0.0
 
-    lb1 = max(lb_conteo, lb_lp)
+    # LB1 = cota LP reforzada (VALIDA). lb_conteo solo como cross-check (ver docstring).
+    lb1 = lb_lp
     info = {"K_bar": K_bar, "n_pbar": len(P_bar),
             "lb_conteo": lb_conteo, "lb_lp": lb_lp}
     return lb1, info
@@ -521,9 +597,11 @@ def solve_p1(dias, PB, PC, v_p, f_p, alpha_p, w_mcp):
 
     # Lower bound LB1 (Procedimiento 1): desigualdad valida F1 >= LB1 para acelerar P1
     lb1, lb1_info = compute_lb1(dias, PB, PC, v_p, f_p, alpha_p, w_mcp)
-    print(f"[P1] LB1 = {lb1:.1f}  (conteo={lb1_info['lb_conteo']:.1f} "
-          f"lp={lb1_info['lb_lp']:.1f} | deficit={lb1_info['K_bar']} "
-          f"{lb1_info['n_pbar']} pac)")
+    _xchk = " [!] conteo>LB1: cota de conteo NO valida, se ignora" \
+        if lb1_info['lb_conteo'] > lb1 + 1e-6 else ""
+    print(f"[P1] LB1 = {lb1:.1f} (LP reforzado)  "
+          f"[conteo_xcheck={lb1_info['lb_conteo']:.1f}] | deficit={lb1_info['K_bar']} "
+          f"{lb1_info['n_pbar']} pac{_xchk}")
 
     ampl = _build_ampl(dias, PB, PC, v_p, f_p, alpha_p, w_mcp)
     ampl.eval("drop eps_f1; drop eps_f2;")
@@ -889,6 +967,10 @@ def run_all():
 
     print(f"Instancias encontradas: {len(dat_files)}")
 
+    # Opcion C: MCP mensual fijo, reconstruido en una pre-pasada por TODAS las instancias
+    # (la agrupacion en meses necesita ver todas las semanas; el pico es por periodo).
+    period_mcp = build_period_mcps(dat_files)
+
     resumen = []
 
     for dat_path in dat_files:
@@ -911,7 +993,7 @@ def run_all():
             print("=" * 70)
 
             dat = parse_dat(dat_path)
-            dias, PB, PC, v_p, f_p, alpha_p, w_mcp = prepare_instance(dat)
+            dias, PB, PC, v_p, f_p, alpha_p, w_mcp = prepare_instance(dat, period_mcp[stem])
 
             print(f"giornilav = {dat['giornilav']}  |  ptot = {len(dat['patients'])}")
             print(f"Entradas MCP (w): {len(w_mcp)}")
