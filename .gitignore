@@ -228,11 +228,15 @@ logs/
 logs-ampl/
 Databases/optimized-sets/
 Databases/real-sets/
+Databases/simulated-sets/
 Databases/optimized-sets-real/
 Databases/optimized-sets-real-debug/
+Databases/optimized-sets-real-crudo/
 logs-real/
+logs-real-crudo/
 logs-real-debug/
 docs/
+figuras/
 analisis-datos-reales.md
 analisis-resultados-gurobi.md
 tfg-problematica-mcp-festivos.md
@@ -244,3 +248,5 @@ model-solver-toy-peor.py
 model-solver-real-debug.py
 
 *.md
+.gitattributes
+.DS_Store
