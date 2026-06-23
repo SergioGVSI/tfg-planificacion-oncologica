@@ -861,41 +861,46 @@ class GeneradorFiguras:
     # GRUPO F — CRUDO vs OPCIÓN C  +  interioridades del solver (logs)
     # ════════════════════════════════════════════════════════════════════════
     def fig_F1_overtime_crudo_vs_c(self):
-        """Overtime crudo (de los logs/CSV crudo disponibles) vs Opción C (resumen real).
-        El barrido crudo puede ser parcial: se grafican solo las instancias con dato crudo."""
+        """Overtime del MCP crudo (barrido completo) vs Opción C. Las 4 instancias
+        infactibles con el MCP crudo se marcan con una barra rayada y la etiqueta 'INF'."""
         dc = self._resumen_real().set_index("instancia")["f1_overtime_slots"]
         rc = self._resumen_crudo()
-        crudo_f1 = {}
-        if not rc.empty:  # preferir el CSV resumen crudo si existe
-            for _, r in rc.iterrows():
-                crudo_f1[r["instancia"]] = r["f1_overtime_slots"]
-        else:             # si no, reconstruir desde los logs crudos disponibles
+        if rc.empty:  # respaldo: reconstruir desde los logs si aún no hay CSV
+            crudo_f1 = {}
             for p in sorted(glob(os.path.join(self.DIR_LOGS_CRUDO, "run_*.txt")), key=_stem_num):
                 stem = os.path.basename(p).replace("run_", "").replace(".txt", "")
                 lg = self._parse_log(stem, crudo=True)
                 if not np.isnan(lg["f1"]):
-                    crudo_f1[stem] = lg["f1"]
-        comunes = [s for s in crudo_f1 if s in dc.index]
-        comunes.sort(key=_stem_num)
-        if not comunes:
-            print("  [SKIP] F1_overtime_crudo_vs_c: sin datos de MCP crudo disponibles")
+                    crudo_f1[stem] = (lg["f1"], False)
+        else:
+            crudo_f1 = {r["instancia"]: (r["f1_overtime_slots"],
+                                         r["status_p1"] == "infeasible")
+                        for _, r in rc.iterrows()}
+        insts = sorted([s for s in crudo_f1 if s in dc.index], key=_stem_num)
+        if not insts:
+            print("  [SKIP] F1_overtime_crudo_vs_c: sin datos de MCP crudo")
             return
-        x = np.arange(len(comunes)); w = 0.42
-        fig, ax = plt.subplots(figsize=(max(5, 0.9 * len(comunes) + 2), 3.8))
-        ax.bar(x - w / 2, [crudo_f1[s] for s in comunes], w, color=COL_CRUDO, label="MCP crudo")
-        ax.bar(x + w / 2, [dc[s] for s in comunes], w, color=COL_C, label="Opción C")
-        for i, s in enumerate(comunes):
-            ax.annotate(f"{crudo_f1[s]:.0f}", (i - w / 2, crudo_f1[s]), ha="center",
-                        va="bottom", fontsize=8)
+        x = np.arange(len(insts)); w = 0.42
+        fig, ax = plt.subplots(figsize=(11.5, 3.9))
+        cruds = [0.0 if crudo_f1[s][1] else crudo_f1[s][0] for s in insts]
+        n_inf = sum(crudo_f1[s][1] for s in insts)
+        ymax = max(cruds + [1])
+        ax.bar(x - w / 2, cruds, w, color=COL_CRUDO, label="MCP crudo")
+        ax.bar(x + w / 2, [dc[s] for s in insts], w, color=COL_C, label="Opción C")
+        for i, s in enumerate(insts):
+            f1c, inf = crudo_f1[s]
+            if inf:  # barra fantasma rayada + 'INF'
+                ax.bar(i - w / 2, ymax, w, color=COL_CRUDO, alpha=0.18, hatch="///")
+                ax.annotate("INF", (i - w / 2, ymax * 0.5), ha="center", va="center",
+                            rotation=90, fontsize=6, color=COL_CRUDO, fontweight="bold")
+            elif f1c > 0:
+                ax.annotate(f"{f1c:.0f}", (i - w / 2, f1c), ha="center", va="bottom", fontsize=6)
         ax.set_xticks(x)
-        ax.set_xticklabels([s.replace("istanza", "") for s in comunes])
+        ax.set_xticklabels([s.replace("istanza", "") for s in insts], rotation=90, fontsize=6)
         ax.set_xlabel("Instancia real"); ax.set_ylabel("Overtime $F_1$ (slots)")
-        ax.set_title("Overtime forzado por el MCP crudo vs eliminado por la Opción C")
-        ax.legend()
-        note = "(barrido crudo parcial)" if len(comunes) < 40 else ""
-        if note:
-            ax.text(0.99, 0.95, note, transform=ax.transAxes, ha="right", va="top",
-                    fontsize=8, style="italic", color="gray")
+        ax.set_title(f"MCP crudo vs Opción C: overtime forzado en 25/47 + {n_inf} infactibles "
+                     f"(rayadas) — frente a 0 con Opción C")
+        ax.legend(loc="upper right")
         self._save(fig, "F1_overtime_crudo_vs_c")
 
     def fig_F2_lb1_vs_conteo(self):
@@ -965,6 +970,28 @@ class GeneradorFiguras:
         ax.set_title("Gap de optimización de $P_3$ por instancia (Opción C)")
         ax.legend()
         self._save(fig, "F4_gap_p3")
+
+    def fig_F5_desenlace_crudo(self):
+        """Desenlace del barrido crudo: F1=0 / F1>0 / infactible (de 51)."""
+        rc = self._resumen_crudo()
+        if rc.empty:
+            print("  [SKIP] F5_desenlace_crudo: sin resumen crudo")
+            return
+        n_inf = int((rc["status_p1"] == "infeasible").sum())
+        feas = rc[rc["status_p1"] != "infeasible"]
+        n0 = int((feas["f1_overtime_slots"] < 0.5).sum())
+        npos = int((feas["f1_overtime_slots"] >= 0.5).sum())
+        cats = ["$F_1=0$\n(reproduce el cero)", "$F_1>0$\n(overtime forzado)", "Infactible"]
+        vals = [n0, npos, n_inf]
+        fig, ax = plt.subplots(figsize=(6.2, 4))
+        b = ax.bar(cats, vals, color=[COL_C, COL_CRUDO, "#555555"], alpha=0.88)
+        for r, v in zip(b, vals):
+            ax.annotate(f"{v}/{len(rc)}", (r.get_x() + r.get_width() / 2, v),
+                        ha="center", va="bottom")
+        ax.set_ylabel("Nº de instancias (de 51)")
+        ax.set_title("Desenlace del MCP crudo: solo 22/51 reproducen el cero del artículo")
+        ax.set_ylim(0, max(vals) * 1.18)
+        self._save(fig, "F5_desenlace_crudo")
 
     # ════════════════════════════════════════════════════════════════════════
     # GRUPO E — ESQUEMAS CONCEPTUALES / MAPAS DE IDEAS (matplotlib puro)
@@ -1043,21 +1070,25 @@ class GeneradorFiguras:
         self._save(fig, "E35_pipeline_lexicografico")
 
     def fig_E36_ventana_deslizante(self):
-        fig, ax = plt.subplots(figsize=(8, 3))
-        ax.set_xlim(0, 12); ax.set_ylim(0, 4)
+        fig, ax = plt.subplots(figsize=(8.5, 3.6))
+        ax.set_xlim(0, 12); ax.set_ylim(0, 4.5); ax.axis("off")
+        ax.text(6, 4.2, "Restricción de capacidad por ventana deslizante",
+                ha="center", fontsize=11, fontweight="bold")
+        # fila de slots (cajas) y etiquetas debajo
         for s in range(12):
-            ax.add_patch(Rectangle((s, 2), 1, 1, fill=False, edgecolor="gray"))
-            ax.text(s + 0.5, 1.7, f"s={s+1}", ha="center", fontsize=7, color="gray")
-        # un paciente con visita de v=3 que empieza en s=4
+            ax.add_patch(Rectangle((s, 2.6), 1, 1, fill=False, edgecolor="gray"))
+            ax.text(s + 0.5, 2.3, f"s={s+1}", ha="center", fontsize=7, color="gray")
+        # un paciente con visita de v=3 que empieza en s=4 (slots 4,5,6)
         for s in range(3, 6):
-            ax.add_patch(Rectangle((s, 2), 1, 1, color=OKABE[0], alpha=0.6))
-        ax.text(4.5, 3.4, "visita de un paciente ($v_p=3$ slots)", ha="center", fontsize=8,
-                color=OKABE[0])
-        ax.annotate("", (3, 1.4), (6, 1.4), arrowprops=dict(arrowstyle="<->", color=COL_BAD))
-        ax.text(4.5, 1.1, "en el slot s=5 hay 1 visita 'en curso' de este paciente\n"
-                          "(ventana [s-v+1, s])", ha="center", fontsize=8, color=COL_BAD)
-        ax.set_title("Restricción de capacidad por ventana deslizante")
-        ax.axis("off")
+            ax.add_patch(Rectangle((s, 2.6), 1, 1, color=OKABE[0], alpha=0.6))
+        ax.text(4.5, 3.85, "visita de un paciente ($v_p=3$ slots)", ha="center",
+                fontsize=8.5, color=OKABE[0])
+        # ventana [s-v+1, s] en s=5: flecha (bien separada del texto)
+        ax.annotate("", (3.05, 1.75), (5.95, 1.75),
+                    arrowprops=dict(arrowstyle="<->", color=COL_BAD, lw=1.4))
+        ax.text(4.5, 0.85, "en el slot $s=5$ la visita está «en curso»: cuenta en la\n"
+                           "ventana $[s-v_p+1,\\ s] = [3, 5]$ (ocupa una sala)",
+                ha="center", fontsize=8.5, color=COL_BAD)
         self._save(fig, "E36_ventana_deslizante")
 
     def fig_E37_mcp_rejilla(self, stem="istanza03"):
@@ -1106,19 +1137,27 @@ class GeneradorFiguras:
     def fig_E39_mapa_mental(self):
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.set_xlim(0, 10); ax.set_ylim(0, 8); ax.axis("off")
-        c = self._caja(ax, (4.0, 3.6), 2.0, 0.9, "TFG\nCitación oncológica", OKABE[7],
-                       fc=OKABE[7] + "22", fs=9)
+        # caja central
+        cx, cy, cw, ch = 4.0, 3.6, 2.0, 0.9
+        self._caja(ax, (cx, cy), cw, ch, "TFG\nCitación oncológica", OKABE[7],
+                   fc=OKABE[7] + "22", fs=9)
+        c_left = (cx, cy + ch / 2); c_right = (cx + cw, cy + ch / 2)
+        bw, bh = 2.2, 1.0
         ramas = [
-            ("Fase 1\nSintéticos + CBC", OKABE[5], (0.4, 6.5)),
-            ("Fase 2\nAMPL+Gurobi (90 runs)", OKABE[4], (0.4, 4.0)),
-            ("Fase 3-5\nMCP, festivos, LB1", OKABE[1], (0.4, 1.4)),
-            ("Fase 6\nDiagnóstico fidelidad", OKABE[3], (7.6, 6.5)),
-            ("Decisión: Opción C\n(MCP mensual)", OKABE[0], (7.6, 4.0)),
-            ("Fase 7\nBarrido 51 + realismo", OKABE[2], (7.6, 1.4)),
+            ("Fase 1\nSintéticos + CBC", OKABE[5], (0.4, 6.5), "L"),
+            ("Fase 2\nAMPL+Gurobi (90 runs)", OKABE[4], (0.4, 4.0), "L"),
+            ("Fase 3-5\nMCP, festivos, LB1", OKABE[1], (0.4, 1.4), "L"),
+            ("Fase 6\nDiagnóstico fidelidad", OKABE[3], (7.6, 6.5), "R"),
+            ("Decisión: Opción C\n(MCP mensual)", OKABE[0], (7.6, 4.0), "R"),
+            ("Fase 7\nBarrido 51 + realismo", OKABE[2], (7.6, 1.4), "R"),
         ]
-        for txt, col, xy in ramas:
-            cc = self._caja(ax, xy, 2.2, 1.0, txt, col, fc="white", fs=8)
-            self._flecha(ax, (5.0, 4.05), cc, color="gray")
+        for txt, col, (bx, by), side in ramas:
+            self._caja(ax, (bx, by), bw, bh, txt, col, fc="white", fs=8)
+            # flecha de BORDE a BORDE (no cruza ningún texto)
+            if side == "L":
+                self._flecha(ax, c_left, (bx + bw, by + bh / 2), color="gray")
+            else:
+                self._flecha(ax, c_right, (bx, by + bh / 2), color="gray")
         ax.text(5, 7.6, "Mapa de desarrollo del proyecto", ha="center", fontsize=12,
                 fontweight="bold")
         self._save(fig, "E39_mapa_mental")
