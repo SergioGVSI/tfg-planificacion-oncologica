@@ -67,7 +67,7 @@ Versiones **verificadas** de este entorno (algunas ejecuciones se hicieron en ot
 
 > **Licencia AMPL/Gurobi.** Cada solver de datos reales requiere activar el módulo con un UUID de
 > licencia AMPL: variable `AMPL_UUID` al principio de `model-solver-real*.py`. Es una licencia
-> académica temporal; **debes poner la tuya**.
+> académica temporal la usada para este TFG; **debes poner la tuya si dispone de una para poder reproducir los resultados**.
 
 ---
 
