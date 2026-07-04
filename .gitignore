@@ -226,6 +226,7 @@ CLAUDE.md
 MODELO.md
 logs/
 logs-ampl/
+Databases/
 Databases/optimized-sets/
 Databases/real-sets/
 Databases/simulated-sets/
@@ -235,6 +236,9 @@ Databases/optimized-sets-real-crudo/
 logs-real/
 logs-real-crudo/
 logs-real-debug/
+mds-to-word/
+sesion1/
+sesion2/
 docs/
 figuras/
 analisis-datos-reales.md
@@ -243,10 +247,7 @@ tfg-problematica-mcp-festivos.md
 tfg-resolucion-y-aceleracion.md
 
 
-model-solver-toy.py
-model-solver-toy-peor.py
-model-solver-real-debug.py
-
 *.md
+!README.md
 .gitattributes
 .DS_Store
