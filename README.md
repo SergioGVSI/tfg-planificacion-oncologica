@@ -1,8 +1,6 @@
 # IICAS-Data-Sim — Optimización y simulación de flujo de pacientes en un hospital de día oncológico
 
-Trabajo Fin de Grado (Grado en Ingeniería Informática, UCLM). Reproducción y extensión del
-modelo de citación de quimioterapia de **Carello, Passacantando & Tánfani (*European Journal of
-Operational Research*, 2025)** sobre los datos reales del **Hospital San Martino (Génova)**.
+Trabajo Fin de Grado (Grado en Ingeniería Informática, UCLM).
 
 El proyecto implementa un **modelo MILP multiobjetivo lexicográfico** ($P_1\rightarrow P_2\rightarrow P_3$)
 que decide, para cada paciente y cada semana, **qué día** y **a qué hora** se realizan su **visita**
@@ -67,7 +65,7 @@ Versiones **verificadas** de este entorno (algunas ejecuciones se hicieron en ot
 
 > **Licencia AMPL/Gurobi.** Cada solver de datos reales requiere activar el módulo con un UUID de
 > licencia AMPL: variable `AMPL_UUID` al principio de `model-solver-real*.py`. Es una licencia
-> académica temporal la usada para este TFG; **debes poner la tuya si dispone de una para poder reproducir los resultados**.
+> académica temporal la usada para este TFG; **debes poner la tuya si dispones de una para poder reproducir los resultados**.
 
 ---
 
@@ -125,28 +123,15 @@ IICAS-Data-Sim/
 ├── logs-real-debug/                # Logs completos de las instancias de control
 │
 ├── figuras/                        # 41 figuras (PDF + PNG) para la memoria
-├── docs/
-│   ├── articulo.pdf                # Artículo de referencia (Carello et al., 2025)
-│   ├── tfg_draft_6.pdf             # Borrador vigente de la memoria (77 pp)
-│   ├── _extract/                   # Texto extraído del artículo (pNN.txt)
-│   ├── _draft/                     # Materiales del borrador
-│   └── pseudocodigo/               # Anexo de pseudocódigo LaTeX (.tex + .pdf compilado)
 │
-├── mds-to-word/                    # 7 documentos .md de análisis (para pasar a Word)
-├── sesion1/ · sesion2/             # Documentos de trabajo de sesiones previas
-├── backups/                        # Copias de seguridad
 ├── venv/                           # Entorno virtual de Python (no versionado)
 │
-├── CLAUDE.md · MODELO.md · *.md    # Guías y análisis a nivel raíz
-├── .gitignore · .gitattributes
 └── README.md                       # (este fichero)
 ```
 
 > **Nota sobre control de versiones.** El `.gitignore` excluye datos, logs, `docs/`, `figuras/`,
-> `mds-to-word/`, `venv/`, backups y **todos los `.md`**. Es decir, Git rastrea esencialmente los
-> **scripts `.py`**; el resto es material generado o documentación local. Si quieres versionar este
-> README: `git add -f README.md`.
-
+> `mds-to-word/`, `venv/`, backups y otros datos de depuración. Es decir, Git rastrea esencialmente los
+> **scripts `.py`**; el resto es material generado o documentación local.
 ---
 
 ## Qué es y para qué sirve cada `.py`
@@ -222,9 +207,9 @@ python generador_figuras.py
 cd docs/pseudocodigo && latexmk -pdf anexo-pseudocodigo.tex && cd ../..
 ```
 
-**Tiempos orientativos** (por instancia real, Apple M5): P1 ~ segundos (cierra en 1 nodo con
+**Tiempos orientativos** (por instancia real): P1 ~ segundos (cierra en 1 nodo con
 Opción C), P2 ~ segundos, P3 el más costoso; media ≈ 235 s/instancia, máximo ≈ 2 250 s en las
-festivas. El barrido completo de 51 instancias son varias horas.
+festivas. El barrido completo de 51 instancias son varias horas, en función del hardware disponible.
 
 ---
 
@@ -240,7 +225,7 @@ for i in range(1, 31):                                  # 30 instancias (v1…v3
     generar_dataset_tfg(num_pacientes, version=i, seed=BASE_SEED + i)
 ```
 
-Perfil de cada paciente (replica el Hospital San Martino, según el artículo):
+Perfil de cada paciente (replica del hospital de referencia, según el artículo):
 
 | Atributo | Distribución |
 |---|---|
@@ -291,30 +276,10 @@ Definidos al inicio de `model-solver-real.py` (idénticos al artículo, §5.1):
 
 ---
 
-## Documentación, figuras y pseudocódigo
-
-- **Memoria del TFG:** `docs/tfg_draft_6.pdf` (borrador vigente). Artículo de referencia:
-  `docs/articulo.pdf`.
-- **Análisis (para Word):** `mds-to-word/` — 7 documentos con trazabilidad total, entre ellos:
-  - `tfg-agregados-completo.md` (documento maestro),
-  - `analisis-barrido-51-instancias.md` (Opción C),
-  - `analisis-barrido-mcp-crudo.md` (MCP crudo, 51 instancias),
-  - `coherencia-y-realismo-del-mcp.md` (utilización vs Tabla 8),
-  - `figuras-recomendadas-tfg.md` (qué figura va en cada sección y su pie).
-- **Figuras:** `figuras/` — 41 figuras (PDF vectorial + PNG). Grupos: A (resultados Opción C),
-  B (agendas), C (datos `.dat`), D (simulados), E (esquemas conceptuales), F (crudo vs C + internals
-  del solver). Regenerables con `python generador_figuras.py`.
-- **Pseudocódigo (anexo):** `docs/pseudocodigo/anexo-pseudocodigo.tex` (+ `.pdf`) — los 4 algoritmos
-  centrales (Opción C, LB1, resolución lexicográfica, subproblema diario) en LaTeX
-  (`algorithm` + `algpseudocode`).
-
----
-
 ## Notas de reproducibilidad y limitaciones
 
 - **Dos máquinas / dos parches de Gurobi.** El banco simulado se ejecutó en **Windows 11 con
-  Gurobi 13.0.1**; los barridos reales (Opción C y crudo) en **macOS Apple Silicon con Gurobi
-  13.0.2**. Los resultados agregados no dependen de esto, pero los tiempos y algún incumbente sí.
+  Gurobi 13.0.1** junto con los barridos reales (Opción C y crudo). Los resultados agregados no dependen de esto, pero los tiempos y algún incumbente sí.
 - **P1 no siempre cierra con el MCP crudo.** En 17/47 instancias del barrido crudo, P1 agota el
   tiempo: el `F1` reportado es un **incumbente** (cota superior), no el óptimo. La cantidad robusta
   es la cota inferior **LB1**. Por eso el mismo `istanza03` crudo dio F1=18 en un run y 24 en otro
@@ -325,12 +290,3 @@ Definidos al inicio de `model-solver-real.py` (idénticos al artículo, §5.1):
   `(612, 156)`).
 
 ---
-
-## Autoría y referencia
-
-- **Autor:** Sergio González Velasco — Grado en Ingeniería Informática, Escuela Superior de
-  Ingeniería Informática (Albacete), Universidad de Castilla-La Mancha.
-- **Tutor:** Francisco Parreño Torres.
-- **Referencia base:** Carello, G., Passacantando, M., & Tánfani, E. (2025). *Interday and intraday
-  chemotherapy appointment scheduling: A patient-centered approach.* **European Journal of
-  Operational Research.**
