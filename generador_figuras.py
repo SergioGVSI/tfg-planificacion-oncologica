@@ -986,7 +986,7 @@ class GeneradorFiguras:
         fig, ax = plt.subplots(figsize=(6.2, 4))
         b = ax.bar(cats, vals, color=[COL_C, COL_CRUDO, "#555555"], alpha=0.88)
         for r, v in zip(b, vals):
-            ax.annotate(f"{v}/{len(rc)}", (r.get_x() + r.get_width() / 2, v),
+            ax.annotate(f"{v}", (r.get_x() + r.get_width() / 2, v),
                         ha="center", va="bottom")
         ax.set_ylabel("Nº de instancias (de 51)")
         ax.set_title("Desenlace del MCP crudo: solo 22/51 reproducen el cero del artículo")
