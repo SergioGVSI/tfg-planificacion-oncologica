@@ -26,9 +26,7 @@ objetivos por orden de prioridad:
 8. [La semilla y la generación de datos sintéticos](#la-semilla-y-la-generación-de-datos-sintéticos)
 9. [Parámetros del modelo (constantes)](#parámetros-del-modelo-constantes)
 10. [Formato de los datos](#formato-de-los-datos)
-11. [Documentación, figuras y pseudocódigo](#documentación-figuras-y-pseudocódigo)
-12. [Notas de reproducibilidad y limitaciones](#notas-de-reproducibilidad-y-limitaciones)
-13. [Autoría y referencia](#autoría-y-referencia)
+11. [Notas de reproducibilidad y limitaciones](#notas-de-reproducibilidad-y-limitaciones)
 
 ---
 
@@ -42,7 +40,6 @@ objetivos por orden de prioridad:
   - **Datos reales (MCP crudo):** **51 instancias** (diagnóstico: 4 infactibles, overtime forzado
     en 25/47).
 - **Figuras:** 41 (PDF + PNG) generadas por `generador_figuras.py`.
-- **Memoria del TFG:** `docs/tfg_draft_6.pdf` (borrador vigente, 77 pp).
 
 ---
 
