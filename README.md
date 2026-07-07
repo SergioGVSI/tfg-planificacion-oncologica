@@ -57,12 +57,10 @@ Versiones **verificadas** de este entorno (algunas ejecuciones se hicieron en ot
 | **pandas** | 3.0.3 | lectura de CSV / análisis |
 | **numpy** | 2.4.6 | generación de datos y cálculos |
 | **matplotlib** | 3.11.0 | figuras (`generador_figuras.py`) |
-| **pypdf** | (opcional) | extracción de texto del PDF del borrador |
-| **TinyTeX / TeX Live 2026** | (opcional) | compilar el anexo de pseudocódigo `docs/pseudocodigo/` |
 
 > **Licencia AMPL/Gurobi.** Cada solver de datos reales requiere activar el módulo con un UUID de
 > licencia AMPL: variable `AMPL_UUID` al principio de `model-solver-real*.py`. Es una licencia
-> académica temporal la usada para este TFG; **debes poner la tuya si dispones de una para poder reproducir los resultados**.
+> académica temporal la usada para este TFG;.
 
 ---
 
@@ -81,7 +79,7 @@ python -m amplpy.modules install gurobi        # + base (se instala solo)
 
 # 4) Activar la licencia AMPL (pon tu UUID en AMPL_UUID dentro de los .py,
 #    o actívala globalmente):
-python -m amplpy.modules activate <TU-UUID-AMPL>
+python -m amplpy.modules activate <LICENCIA AMPL>
 ```
 
 Comprobación rápida:
@@ -126,8 +124,7 @@ IICAS-Data-Sim/
 └── README.md                       # (este fichero)
 ```
 
-> **Nota sobre control de versiones.** El `.gitignore` excluye datos, logs, `docs/`, `figuras/`,
-> `mds-to-word/`, `venv/`, backups y otros datos de depuración. Es decir, Git rastrea esencialmente los
+> **Nota sobre control de versiones.** El `.gitignore` excluye datos, logs, `figuras/`, `venv/`, backups y otros datos de depuración. Es decir, Git rastrea esencialmente los
 > **scripts `.py`**; el resto es material generado o documentación local.
 ---
 
