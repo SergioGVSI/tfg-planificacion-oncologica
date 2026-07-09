@@ -39,7 +39,6 @@ objetivos por orden de prioridad:
   - **Datos reales (Opción C):** **51 instancias** → overtime 0 en 49/51, espera 0 en 50/51.
   - **Datos reales (MCP crudo):** **51 instancias** (diagnóstico: 4 infactibles, overtime forzado
     en 25/47).
-- **Figuras:** 41 (PDF + PNG) generadas por `generador_figuras.py`.
 
 ---
 
@@ -196,9 +195,6 @@ python model-solver-toy-peor.py     # 3 días, déficit     → LB1=3, F1=6
 # ── FIGURAS ─────────────────────────────────────────────────────────────────
 python generador_figuras.py
 #    → figuras/   (41 figuras PDF + PNG)
-
-# ── ANEXO DE PSEUDOCÓDIGO (LaTeX, opcional) ─────────────────────────────────
-cd docs/pseudocodigo && latexmk -pdf anexo-pseudocodigo.tex && cd ../..
 ```
 
 **Tiempos orientativos** (por instancia real): P1 ~ segundos (cierra en 1 nodo con
@@ -250,7 +246,7 @@ Definidos al inicio de `model-solver-real.py` (idénticos al artículo, §5.1):
 | `TIME_LIMIT_P1/P2/P3` | 600 / 600 / 1200 s | límites de tiempo por subproblema |
 | `TIME_LIMIT_DAY` | 120 s | límite del subproblema diario (Procedimiento 2) |
 | `GAP_REL` | 0,05 | gap relativo de Gurobi (5 %) |
-| `EXCLUDED_INSTANCES` | `{istanza14}` | única de las 52 que no figura en la Tabla 7 del artículo |
+| `EXCLUDED_INSTANCES` | `{istanza14}` | única de las 52 que no figura en la Tabla 7 del artículo de referencia|
 
 ---
 
