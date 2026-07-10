@@ -461,9 +461,9 @@ class GeneradorFiguras:
         fig, ax = plt.subplots(figsize=(5.5, 4))
         b = ax.bar(["$P_1$", "$P_2$", "$P_3$"], cierres, color=OKABE[:3], alpha=0.85)
         for rect, v in zip(b, cierres):
-            ax.annotate(f"{v}/{len(df)}", (rect.get_x() + rect.get_width() / 2, v),
+            ax.annotate(f"{v}", (rect.get_x() + rect.get_width() / 2, v),
                         ha="center", va="bottom")
-        ax.set_ylabel("Instancias cerradas a óptimo (≤5%)")
+        ax.set_ylabel(f"Instancias cerradas a óptimo (≤5%) (de {len(df)})")
         ax.set_title("Cierre por subproblema (el artículo cierra $P_3$ en 9/51)")
         ax.set_ylim(0, len(df) * 1.12)
         self._save(fig, "A9_cierres")
